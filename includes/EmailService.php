@@ -1,4 +1,4 @@
-<?php
+C:\xamp\php\php.exe<?php
 /**
  * Shared email delivery helper for reservation notifications.
  * Uses SMTP when configured and falls back to saving a local preview file.
