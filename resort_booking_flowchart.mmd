@@ -1,0 +1,65 @@
+graph TD
+    A[User visits Homepage] --> B{Browse Resort Options}
+    B --> C[View Rooms]
+    B --> D[View Cottages]
+    B --> E[View Pools]
+
+    C --> F{Need to Book?}
+    D --> F
+    E --> F
+
+    F --> G[Login Required]
+    G --> H{Choose Login Method}
+    H -->|Google OAuth| I[Google Account Selection]
+    H -->|Traditional Login| J[Email/Password Login]
+
+    I --> K[Google Authentication]
+    K -->|Success| L[User Profile Created/Updated]
+    K -->|Cancel/Failed| M[Return to Login Options]
+    M --> H
+
+    J --> N[Validate Credentials]
+    N -->|Success| L
+    N -->|Fail| O[Show Error]
+    O --> J
+
+    L --> P[Redirect to Booking]
+
+    P --> Q[Select Dates & Guests]
+    Q --> R[Choose Room/Cottage]
+    R --> S[Review Booking Details]
+    S --> T[Confirm Booking]
+    T --> U[Submit to API]
+    U --> V{Booking Success?}
+    V -->|Yes| W[Show Confirmation]
+    V -->|No| X[Show Error]
+    X --> S
+
+    W --> Y[View My Bookings]
+    Y --> Z[Manage Bookings]
+    Z --> AA[Cancel Booking]
+    AA --> BB[Confirmation]
+
+    Y --> CC[Leave Review]
+    CC --> DD[Submit Review]
+
+    W --> EE[User Profile]
+    EE --> FF[Update Profile]
+    FF --> GG[Save Changes]
+
+    %% Admin Flow
+    KK[Admin Login] --> LL[Admin Dashboard]
+    LL --> MM[View All Bookings]
+    MM --> NN[Approve/Reject Bookings]
+    NN --> OO[Update Status]
+
+    LL --> PP[Manage Rooms/Cottages]
+    PP --> QQ[Add/Edit/Delete]
+
+    LL --> RR[View Reports]
+    RR --> SS[Revenue Stats]
+    RR --> TT[User Stats]
+
+    LL --> UU[Manage Users]
+    UU --> VV[View User List]
+    VV --> WW[Edit User Details]

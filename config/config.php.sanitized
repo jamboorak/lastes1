@@ -1,0 +1,16 @@
+<?php
+// Sanitized config template used for history rewrite. This file contains
+// no secrets and will be copied into `config/config.php` across commits
+// during the history rewrite process.
+<?php
+// Minimal sanitized SMTP settings (no credentials stored here)
+define('SMTP_HOST', 'sandbox.smtp.mailtrap.io');
+define('SMTP_PORT', 587);
+define('SMTP_USERNAME', '');
+define('SMTP_PASSWORD', '');
+define('SMTP_SECURE', 'tls');
+
+// Keep other necessary defaults but do not include secrets.
+define('SMTP_FROM_NAME', 'Resort Paradise');
+
+?>

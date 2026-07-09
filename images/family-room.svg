@@ -1,0 +1,6 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="600" height="400" viewBox="0 0 600 400">
+  <rect width="600" height="400" rx="24" ry="24" fill="#0f3b84" />
+  <rect x="24" y="24" width="552" height="220" rx="18" ry="18" fill="#ffffff" opacity="0.12" />
+  <text x="50%" y="50%" text-anchor="middle" fill="#ffffff" font-family="Arial, sans-serif" font-size="38">Family Room</text>
+  <text x="50%" y="60%" text-anchor="middle" fill="#ffffff" font-family="Arial, sans-serif" font-size="20">Spacious room for up to 6 guests</text>
+</svg>

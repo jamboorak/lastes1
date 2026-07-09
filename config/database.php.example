@@ -1,0 +1,195 @@
+<?php
+/**
+ * Database Configuration and Connection Class
+ * 
+ * IMPORTANT: Create a database.php file with your actual database credentials
+ * Do NOT commit database.php to version control - it's in .gitignore
+ */
+
+class Database {
+    private $host = 'localhost';          // Database host
+    private $username = 'root';           // Database username
+    private $password = '';               // Database password
+    private $database = 'resort_db';      // Database name
+    private $conn;
+    
+    public function __construct() {
+        $this->connect();
+    }
+    
+    /**
+     * Establish database connection
+     */
+    private function connect() {
+        try {
+            $this->conn = new mysqli($this->host, $this->username, $this->password, $this->database);
+            
+            if ($this->conn->connect_error) {
+                throw new Exception("Connection failed: " . $this->conn->connect_error);
+            }
+            
+            // Set charset to utf8
+            $this->conn->set_charset("utf8");
+            
+        } catch (Exception $e) {
+            die("Database Error: " . $e->getMessage());
+        }
+    }
+    
+    /**
+     * Get database connection
+     */
+    public function getConnection() {
+        return $this->conn;
+    }
+    
+    /**
+     * Close database connection
+     */
+    public function closeConnection() {
+        if ($this->conn) {
+            $this->conn->close();
+        }
+    }
+    
+    /**
+     * Insert query
+     */
+    public function insert($sql, $params = []) {
+        $stmt = $this->conn->prepare($sql);
+        if (!$stmt) {
+            return false;
+        }
+        
+        if (!empty($params)) {
+            $types = '';
+            foreach ($params as $param) {
+                if (is_int($param)) {
+                    $types .= 'i';
+                } elseif (is_float($param)) {
+                    $types .= 'd';
+                } else {
+                    $types .= 's';
+                }
+            }
+            $stmt->bind_param($types, ...$params);
+        }
+        
+        if ($stmt->execute()) {
+            return $this->conn->insert_id;
+        }
+        return false;
+    }
+    
+    /**
+     * Update query
+     */
+    public function update($sql, $params = []) {
+        $stmt = $this->conn->prepare($sql);
+        if (!$stmt) {
+            return false;
+        }
+        
+        if (!empty($params)) {
+            $types = '';
+            foreach ($params as $param) {
+                if (is_int($param)) {
+                    $types .= 'i';
+                } elseif (is_float($param)) {
+                    $types .= 'd';
+                } else {
+                    $types .= 's';
+                }
+            }
+            $stmt->bind_param($types, ...$params);
+        }
+        
+        return $stmt->execute() ? $stmt->affected_rows : false;
+    }
+    
+    /**
+     * Delete query
+     */
+    public function delete($sql, $params = []) {
+        return $this->update($sql, $params);
+    }
+    
+    /**
+     * Get single row
+     */
+    public function getRow($sql, $params = []) {
+        $stmt = $this->conn->prepare($sql);
+        if (!$stmt) {
+            return null;
+        }
+        
+        if (!empty($params)) {
+            $types = '';
+            foreach ($params as $param) {
+                if (is_int($param)) {
+                    $types .= 'i';
+                } elseif (is_float($param)) {
+                    $types .= 'd';
+                } else {
+                    $types .= 's';
+                }
+            }
+            $stmt->bind_param($types, ...$params);
+        }
+        
+        $stmt->execute();
+        $result = $stmt->get_result();
+        return $result->fetch_assoc();
+    }
+    
+    /**
+     * Get multiple rows
+     */
+    public function getRows($sql, $params = []) {
+        $stmt = $this->conn->prepare($sql);
+        if (!$stmt) {
+            return [];
+        }
+        
+        if (!empty($params)) {
+            $types = '';
+            foreach ($params as $param) {
+                if (is_int($param)) {
+                    $types .= 'i';
+                } elseif (is_float($param)) {
+                    $types .= 'd';
+                } else {
+                    $types .= 's';
+                }
+            }
+            $stmt->bind_param($types, ...$params);
+        }
+        
+        $stmt->execute();
+        $result = $stmt->get_result();
+        return $result->fetch_all(MYSQLI_ASSOC);
+    }
+    
+    /**
+     * Begin transaction
+     */
+    public function beginTransaction() {
+        $this->conn->begin_transaction();
+    }
+    
+    /**
+     * Commit transaction
+     */
+    public function commit() {
+        $this->conn->commit();
+    }
+    
+    /**
+     * Rollback transaction
+     */
+    public function rollback() {
+        $this->conn->rollback();
+    }
+}
+
+?>

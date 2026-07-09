@@ -1,0 +1,34 @@
+<?php
+// SMTP settings for Gmail SMTP delivery.
+// Use a Gmail App Password and enable 2-step verification on the Gmail account.
+// IMPORTANT: Create a config.php file in this directory with your actual credentials
+// Do NOT commit config.php to version control - it's in .gitignore
+
+define('SMTP_HOST', 'smtp.gmail.com');
+define('SMTP_PORT', 587);
+define('SMTP_USERNAME', 'your-email@gmail.com');  // Your Gmail address
+define('SMTP_PASSWORD', 'your-app-password');      // Your Gmail App Password
+define('SMTP_SECURE', 'tls');
+
+define('SMTP_FROM_NAME', 'Villa Soledad Garden Resort');
+
+define('SITE_NAME', 'Villa Soledad Garden Resort');
+define('SITE_EMAIL', 'resort@example.com');
+define('SITE_PHONE', '+63-XXX-XXX-XXXX');
+define('SITE_URL', 'http://localhost/restorts/');
+define('MIN_PASSWORD_LENGTH', 8);
+define('HASH_ALGO', PASSWORD_DEFAULT);
+define('ITEMS_PER_PAGE', 10);
+
+// Google OAuth Configuration
+// Get these from: https://console.cloud.google.com/apis/credentials
+define('GOOGLE_CLIENT_ID', 'your-google-client-id.apps.googleusercontent.com');
+define('GOOGLE_CLIENT_SECRET', 'your-google-client-secret');
+
+// Resort Information (Update as needed)
+define('RESORT_NAME', 'Villa Soledad Garden Resort');
+define('RESORT_PHONE', '+63-XXX-XXX-XXXX');
+define('RESORT_EMAIL', 'resort@example.com');
+define('RESORT_ADDRESS', 'Your Resort Address');
+
+?>
