@@ -42,7 +42,7 @@ $recentReservationsResult = $conn->query($recentReservationsSql);
 $recentReservations = $recentReservationsResult->fetch_all(MYSQLI_ASSOC);
 
 // Fetch processed reservations for the booking records section
-$bookingRecordsSql = "SELECT r.id, r.user_id, r.check_in, r.check_out, r.adults, r.children, r.seniors, r.total_amount, COALESCE(NULLIF(r.status, ''), 'pending') AS status, COALESCE(u.fullname, 'Guest') AS guest_name, COALESCE(u.email, '') AS guest_email, COALESCE(u.phone, '') AS guest_phone, GROUP_CONCAT(CONCAT(ri.item_name, ' (', ri.item_type, ')') SEPARATOR ', ') AS items FROM reservations r LEFT JOIN users u ON r.user_id = u.id LEFT JOIN reservation_items ri ON r.id = ri.reservation_id WHERE COALESCE(NULLIF(r.status, ''), 'pending') IN ('approved', 'cancelled', 'completed') GROUP BY r.id ORDER BY r.created_at DESC";
+$bookingRecordsSql = "SELECT r.id, r.user_id, r.check_in, r.check_out, r.adults, r.children, r.seniors, r.total_amount, COALESCE(NULLIF(r.status, ''), 'pending') AS status, r.tour_type, COALESCE(u.fullname, 'Guest') AS guest_name, COALESCE(u.email, '') AS guest_email, COALESCE(u.phone, '') AS guest_phone, GROUP_CONCAT(CONCAT(ri.item_name, ' (', ri.item_type, ')') SEPARATOR ', ') AS items FROM reservations r LEFT JOIN users u ON r.user_id = u.id LEFT JOIN reservation_items ri ON r.id = ri.reservation_id WHERE COALESCE(NULLIF(r.status, ''), 'pending') IN ('approved', 'cancelled', 'completed') GROUP BY r.id ORDER BY r.created_at DESC";
 $bookingRecordsResult = $conn->query($bookingRecordsSql);
 $bookingRecords = [];
 
@@ -53,6 +53,7 @@ if ($bookingRecordsResult) {
         $guestPhone = trim($row['guest_phone'] ?? '');
         $items = trim($row['items'] ?? '');
         $guestCount = (int)($row['adults'] ?? 0) + (int)($row['children'] ?? 0) + (int)($row['seniors'] ?? 0);
+        $tourType = $row['tour_type'] ?? 'day';
 
         $bookingRecords[] = [
             'id' => (int) $row['id'],
@@ -64,12 +65,13 @@ if ($bookingRecordsResult) {
             'amount' => number_format((float) $row['total_amount'], 2, '.', ''),
             'status' => $row['status'] ?? 'pending',
             'checkIn' => $row['check_in'],
-            'checkOut' => $row['check_out']
+            'checkOut' => $row['check_out'],
+            'tourType' => $tourType
         ];
     }
 }
 
-$activeSection = isset($_GET['section']) && in_array($_GET['section'], ['dashboard', 'reservations', 'booking-records', 'rooms', 'cottages', 'pools', 'foods', 'facilities', 'pricing', 'scheduling', 'reports', 'statistics', 'customers', 'concerns', 'system-data', 'monitoring'], true) ? $_GET['section'] : 'dashboard';
+$activeSection = isset($_GET['section']) && in_array($_GET['section'], ['dashboard', 'reservations', 'booking-records', 'rooms', 'cottages', 'pools', 'foods', 'facilities', 'pricing', 'scheduling', 'reports', 'statistics', 'reviews', 'concerns', 'system-data', 'monitoring'], true) ? $_GET['section'] : 'dashboard';
 $editingRoom = null;
 $editingCottage = null;
 $editingPool = null;
@@ -211,7 +213,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             $fileName = 'room_' . time() . '_' . basename($_FILES['room_image']['name']);
             $uploadPath = $uploadDir . $fileName;
             if (move_uploaded_file($_FILES['room_image']['tmp_name'], $uploadPath)) {
-                $imageUrl = 'admin/uploads/' . $fileName;
+                $imageUrl = SITE_URL . 'admin/uploads/' . $fileName;
             }
         } elseif ($roomId > 0) {
             // Keep existing image if no new file uploaded during edit
@@ -283,7 +285,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                 $fileName = 'cottage_' . time() . '_' . basename($_FILES['cottage_image']['name']);
                 $uploadPath = $uploadDir . $fileName;
                 if (move_uploaded_file($_FILES['cottage_image']['tmp_name'], $uploadPath)) {
-                    $imageUrl = 'admin/uploads/' . $fileName;
+                    $imageUrl = SITE_URL . 'admin/uploads/' . $fileName;
                 }
             } elseif ($cottageId > 0) {
                 // Keep existing image if no new file uploaded during edit
@@ -351,7 +353,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                 $fileName = 'pool_' . time() . '_' . basename($_FILES['pool_image']['name']);
                 $uploadPath = $uploadDir . $fileName;
                 if (move_uploaded_file($_FILES['pool_image']['tmp_name'], $uploadPath)) {
-                    $imageUrl = 'admin/uploads/' . $fileName;
+                    $imageUrl = SITE_URL . 'admin/uploads/' . $fileName;
                 }
             } elseif ($poolId > 0) {
                 // Keep existing image if no new file uploaded during edit
@@ -420,7 +422,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                 $fileName = 'food_' . time() . '_' . basename($_FILES['food_image']['name']);
                 $uploadPath = $uploadDir . $fileName;
                 if (move_uploaded_file($_FILES['food_image']['tmp_name'], $uploadPath)) {
-                    $imageUrl = 'admin/uploads/' . $fileName;
+                    $imageUrl = SITE_URL . 'admin/uploads/' . $fileName;
                 }
             } elseif ($foodId > 0) {
                 $result = $conn->query("SELECT image_url FROM foods WHERE id = $foodId");
@@ -996,7 +998,6 @@ $reviews = $reviewsResult->fetch_all(MYSQLI_ASSOC);
                         <li><a href="#" class="menu-link" data-section="foods"><i class="fas fa-utensils"></i> Manage Food</a></li>
                     <li><a href="#" class="menu-link" data-section="reports"><i class="fas fa-file-alt"></i> Reports</a></li>
                     <li><a href="#" class="menu-link" data-section="statistics"><i class="fas fa-bar-chart"></i> Statistics</a></li>
-                    <li><a href="#" class="menu-link" data-section="customers"><i class="fas fa-users"></i> Customers</a></li>
                     <li><a href="#" class="menu-link" data-section="reviews"><i class="fas fa-star"></i> Reviews</a></li>
                 </ul>
             </aside>
@@ -1232,7 +1233,13 @@ $reviews = $reviewsResult->fetch_all(MYSQLI_ASSOC);
                                 <?php endfor; ?>
                             </span>
                         </div>
-                        <p style="margin: 0.5rem 0; color: var(--text-dark);"><?php echo htmlspecialchars($review['comment']); ?></p>
+                        <?php
+                            $adminReviewText = trim((string)($review['review_text'] ?? $review['comment'] ?? $review['text'] ?? ''));
+                            if ($adminReviewText === '') {
+                                $adminReviewText = '(No comment provided)';
+                            }
+                        ?>
+                        <p style="margin: 0.5rem 0; color: var(--text-dark);"><?php echo htmlspecialchars($adminReviewText); ?></p>
                         <small style="color: var(--text-light);"><?php echo date('M d, Y H:i', strtotime($review['created_at'])); ?></small>
                     </div>
                     <?php endforeach; ?>
@@ -1386,7 +1393,6 @@ $reviews = $reviewsResult->fetch_all(MYSQLI_ASSOC);
                                     <?php $reservationStatus = empty($reservation['status']) ? 'pending' : $reservation['status']; ?>
                                     <td><span class="status-badge status-<?php echo strtolower(htmlspecialchars($reservationStatus)); ?>"><?php echo ucfirst(htmlspecialchars($reservationStatus)); ?></span></td>
                                     <td>
-                                        <button class="btn-small btn-edit" onclick="viewReservation(<?php echo $reservation['id']; ?>)">View</button>
                                         <?php if ($reservationStatus === 'pending'): ?>
                                         <button class="btn-small btn-approve" onclick="updateReservationStatus(<?php echo $reservation['id']; ?>, 'approved')">Approve</button>
                                         <button class="btn-small btn-reject" onclick="updateReservationStatus(<?php echo $reservation['id']; ?>, 'cancelled')">Cancel</button>
@@ -1423,6 +1429,7 @@ $reviews = $reviewsResult->fetch_all(MYSQLI_ASSOC);
                                     <th>Contact</th>
                                     <th>Items</th>
                                     <th>Dates</th>
+                                    <th>Tour Hours</th>
                                     <th>Guests</th>
                                     <th>Amount</th>
                                     <th>Status</th>
@@ -2274,24 +2281,145 @@ $reviews = $reviewsResult->fetch_all(MYSQLI_ASSOC);
             const startDate = document.getElementById('reportStartDate').value;
             const endDate = document.getElementById('reportEndDate').value;
             
-            if (reportType && startDate && endDate) {
-                console.log('Generating report:', { reportType, startDate, endDate });
-                
-                // Simulate report generation
-                const reportContent = `
-                    <h4>${reportType.charAt(0).toUpperCase() + reportType.slice(1)} Report</h4>
-                    <p><strong>Period:</strong> ${startDate} to ${endDate}</p>
-                    <p><strong>Total Records:</strong> 123</p>
-                    <p><strong>Summary:</strong> This is a sample report content.</p>
-                `;
-                
-                document.getElementById('reportResults').innerHTML = reportContent;
+            if (!reportType || !startDate || !endDate) {
+                alert('Please select report type and date range');
+                return;
+            }
+
+            if (reportType === 'revenue') {
+                generateRevenueReport(startDate, endDate);
+            } else if (reportType === 'customer') {
+                generateCustomerReport(startDate, endDate);
             }
         }
 
+        async function generateRevenueReport(startDate, endDate) {
+            const reportResults = document.getElementById('reportResults');
+            reportResults.innerHTML = '<p style="color: var(--text-light);"><i class="fas fa-spinner fa-spin"></i> Generating report...</p>';
+
+            try {
+                const response = await fetch(`../api/get_monthly_revenue_report.php?start_date=${startDate}&end_date=${endDate}`);
+                const data = await response.json();
+
+                if (!data.success) {
+                    reportResults.innerHTML = `<p style="color: #ef4444;">Error: ${data.message}</p>`;
+                    return;
+                }
+
+                const monthlyData = data.data;
+                const summary = data.summary;
+
+                let tableRows = '';
+                monthlyData.forEach(row => {
+                    tableRows += `
+                        <tr>
+                            <td>${row.month_name}</td>
+                            <td>${row.total_bookings}</td>
+                            <td>${row.approved_bookings}</td>
+                            <td>${row.completed_bookings}</td>
+                            <td>${row.cancelled_bookings}</td>
+                            <td>₱${row.total_revenue.toLocaleString('en-PH', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</td>
+                        </tr>
+                    `;
+                });
+
+                // Add summary row
+                tableRows += `
+                    <tr style="background: var(--primary-blue); color: white; font-weight: bold;">
+                        <td>TOTAL</td>
+                        <td>${summary.total_bookings}</td>
+                        <td>${summary.approved_bookings}</td>
+                        <td>${summary.completed_bookings}</td>
+                        <td>${summary.cancelled_bookings}</td>
+                        <td>₱${summary.total_revenue.toLocaleString('en-PH', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</td>
+                    </tr>
+                `;
+
+                const reportContent = '<div id="revenueReportContent">' +
+                    '<div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 1.5rem;">' +
+                        '<div>' +
+                            '<h3 style="color: var(--primary-blue); margin: 0;">Monthly Revenue Report</h3>' +
+                            '<p style="color: var(--text-light); margin: 0.5rem 0 0 0;">' +
+                                'Period: ' + new Date(startDate).toLocaleDateString('en-US', { year: 'numeric', month: 'long', day: 'numeric' }) + ' - ' +
+                                new Date(endDate).toLocaleDateString('en-US', { year: 'numeric', month: 'long', day: 'numeric' }) +
+                            '</p>' +
+                        '</div>' +
+                        '<button class="btn-small btn-edit" id="printReportBtn">' +
+                            '<i class="fas fa-print"></i> Print Report' +
+                        '</button>' +
+                    '</div>' +
+                    '<div class="table-container">' +
+                        '<table>' +
+                            '<thead>' +
+                                '<tr>' +
+                                    '<th>Month</th>' +
+                                    '<th>Total Bookings</th>' +
+                                    '<th>Approved</th>' +
+                                    '<th>Completed</th>' +
+                                    '<th>Cancelled</th>' +
+                                    '<th>Total Revenue</th>' +
+                                '</tr>' +
+                            '</thead>' +
+                            '<tbody>' +
+                                tableRows +
+                            '</tbody>' +
+                        '</table>' +
+                    '</div>' +
+                    '<div style="margin-top: 1.5rem; padding: 1rem; background: var(--bg-light); border-radius: 8px;">' +
+                        '<h4 style="color: var(--primary-blue); margin: 0 0 0.5rem 0;">Summary</h4>' +
+                        '<p style="margin: 0.25rem 0;"><strong>Total Revenue:</strong> ₱' + summary.total_revenue.toLocaleString('en-PH', { minimumFractionDigits: 2, maximumFractionDigits: 2 }) + '</p>' +
+                        '<p style="margin: 0.25rem 0;"><strong>Total Bookings:</strong> ' + summary.total_bookings + '</p>' +
+                        '<p style="margin: 0.25rem 0;"><strong>Success Rate:</strong> ' + (summary.total_bookings > 0 ? ((summary.approved_bookings + summary.completed_bookings) / summary.total_bookings * 100).toFixed(1) : 0) + '%</p>' +
+                    '</div>' +
+                '</div>';
+
+                reportResults.innerHTML = reportContent;
+
+                // Add event listener to print button
+                document.getElementById('printReportBtn').addEventListener('click', printRevenueReport);
+
+            } catch (error) {
+                reportResults.innerHTML = '<p style="color: #ef4444;">Error generating report: ' + error.message + '</p>';
+            }
+        }
+
+        function generateCustomerReport(startDate, endDate) {
+            const reportResults = document.getElementById('reportResults');
+            reportResults.innerHTML = '<h4>Customer Analytics Report</h4>' +
+                '<p><strong>Period:</strong> ' + startDate + ' to ' + endDate + '</p>' +
+                '<p style="color: var(--text-light);">Customer analytics report will be implemented here.</p>';
+        }
+
+        function printRevenueReport() {
+            const reportContent = document.getElementById('revenueReportContent').innerHTML;
+            const printWindow = window.open('', '_blank');
+            printWindow.document.write('<!DOCTYPE html><html><head>' +
+                '<title>Monthly Revenue Report - Villa Soledad Garden Resort</title>' +
+                '<style>' +
+                    'body { font-family: Arial, sans-serif; padding: 20px; }' +
+                    'table { width: 100%; border-collapse: collapse; margin: 20px 0; }' +
+                    'th, td { border: 1px solid #ddd; padding: 12px; text-align: left; }' +
+                    'th { background: #1e3a8a; color: white; }' +
+                    'tr:nth-child(even) { background: #f9f9f9; }' +
+                    '.summary { background: #f0f4ff; padding: 15px; border-radius: 8px; margin-top: 20px; }' +
+                    'h3 { color: #1e3a8a; }' +
+                    '@media print { body { print-color-adjust: exact; -webkit-print-color-adjust: exact; } }' +
+                '</style>' +
+                '</head><body>' +
+                    reportContent +
+                    '<script>' +
+                        'window.onload = function() {' +
+                            'window.print();' +
+                            'window.close();' +
+                        '};' +
+                    '<\/script>' +
+                '</body></html>'
+            );
+            printWindow.document.close();
+        }
+
         function exportReport() {
-            console.log('Exporting report to PDF...');
-            alert('Report exported successfully! (PDF export functionality)');
+            alert('PDF export functionality will be implemented. Use Print Report for now.');
         }
 
         // Customer Management Functions
@@ -2402,22 +2530,29 @@ $reviews = $reviewsResult->fetch_all(MYSQLI_ASSOC);
 
             const recordsTableBody = document.getElementById('recordsTableBody');
             if (!filteredRecords.length) {
-                recordsTableBody.innerHTML = '<tr><td colspan="8" style="text-align:center; padding:1.5rem; color:var(--text-light);">No booking records found.</td></tr>';
+                recordsTableBody.innerHTML = '<tr><td colspan="9" style="text-align:center; padding:1.5rem; color:var(--text-light);">No booking records found.</td></tr>';
                 return;
             }
 
-            recordsTableBody.innerHTML = filteredRecords.map((record) => `
+            recordsTableBody.innerHTML = filteredRecords.map((record) => {
+                const tourType = record.tourType || 'day';
+                const tourHours = tourType === 'day' 
+                    ? '8:00 AM - 5:00 PM' 
+                    : '8:00 PM - 5:00 AM (next day)';
+                
+                return `
                 <tr>
                     <td>#${record.id}</td>
                     <td>${escapeHtml(record.guestName)}</td>
                     <td>${escapeHtml(record.contact || 'N/A')}</td>
                     <td>${escapeHtml(record.items)}</td>
                     <td>${escapeHtml(record.dates)}</td>
+                    <td>${escapeHtml(tourHours)}</td>
                     <td>${record.guests}</td>
                     <td>₱${Number(record.amount).toLocaleString('en-PH', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</td>
                     <td><span class="status-badge status-${escapeHtml(record.status)}">${escapeHtml(capitalize(record.status))}</span></td>
                 </tr>
-            `).join('');
+            `}).join('');
         }
 
         // Modal functions for Add Room, Cottage, and Pool

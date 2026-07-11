@@ -78,12 +78,20 @@ if (empty($items) || ($adults + $children + $seniors) === 0) {
     exit();
 }
 
-// Use selectedDate or current date if checkIn/checkOut are empty
+// Use selectedDate or current date if checkIn is empty
 if (empty($checkIn)) {
     $checkIn = date('Y-m-d');
 }
+
+// Calculate check-out based on tour type
+// Day tour: check-out is same day (5 PM)
+// Night tour: check-out is next day (overnight)
 if (empty($checkOut)) {
-    $checkOut = date('Y-m-d', strtotime('+1 day'));
+    if ($tourType === 'day') {
+        $checkOut = $checkIn; // Same day for day tour
+    } else {
+        $checkOut = date('Y-m-d', strtotime($checkIn . ' +1 day')); // Next day for night tour
+    }
 }
 
 function getItemLimit($conn, $itemName) {

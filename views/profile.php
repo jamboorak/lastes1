@@ -1,343 +1,248 @@
 <?php
-require_once __DIR__ . '/../includes/header.php';
+require_once __DIR__ . '/../config/config.php';
+if (session_status() === PHP_SESSION_NONE) {
+    session_start();
+}
+require_once __DIR__ . '/../config/database.php';
+require_once __DIR__ . '/../models/User.php';
 
-// Redirect if not logged in
-if (!$user->isLoggedIn()) {
+// Check if user is logged in BEFORE including header
+if (!isset($_SESSION['user_id'])) {
     header('Location: ' . SITE_URL . 'google-auth.php?action=login');
     exit();
 }
 
-$pageTitle = 'My Profile';
+require_once __DIR__ . '/../includes/header.php';
+
+$userId = $_SESSION['user_id'];
+$user = new User();
+$currentUser = $user->getCurrentUser();
+
+// Handle profile update
+$updateMessage = '';
+if ($_SERVER['REQUEST_METHOD'] === 'POST') {
+    $fullname = $_POST['fullname'] ?? '';
+    $email = $_POST['email'] ?? '';
+    $phone = $_POST['phone'] ?? '';
+
+    if (!empty($fullname) && !empty($email) && !empty($phone)) {
+        $result = $user->updateProfile($userId, $fullname, $email, $phone);
+        if ($result['success']) {
+            $updateMessage = '<div style="background-color: #d1fae5; color: #065f46; padding: 1rem; border-radius: 5px; margin-bottom: 1rem;"><i class="fas fa-check-circle"></i> Profile updated successfully!</div>';
+            // Refresh current user data
+            $currentUser = $user->getCurrentUser();
+        } else {
+            $updateMessage = '<div style="background-color: #fee2e2; color: #7f1d1d; padding: 1rem; border-radius: 5px; margin-bottom: 1rem;"><i class="fas fa-exclamation-circle"></i> ' . htmlspecialchars($result['message']) . '</div>';
+        }
+    }
+}
 ?>
 
-<style>
-.profile-container {
-    max-width: 1200px;
-    margin: 2rem auto;
-    padding: 0 2rem;
-    display: grid;
-    grid-template-columns: 350px 1fr;
-    gap: 2rem;
-    min-height: 600px;
-}
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>My Profile - Villa Soledad</title>
+    <link rel="stylesheet" href="<?php echo SITE_URL; ?>css/style.css">
+    <link href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.0.0/css/all.min.css" rel="stylesheet">
+    <style>
+        body {
+            background: #f3f4f6;
+        }
 
-.profile-sidebar {
-    background: #f8f9fa;
-    border-radius: 16px;
-    padding: 2rem;
-    height: fit-content;
-    box-shadow: 0 4px 12px rgba(0, 0, 0, 0.08);
-}
+        .profile-page {
+            padding: 2rem 1rem 4rem;
+            max-width: 800px;
+            margin: 0 auto;
+        }
 
-.profile-picture-container {
-    text-align: center;
-    margin-bottom: 2rem;
-}
+        .profile-header {
+            display: flex;
+            align-items: center;
+            gap: 2rem;
+            margin-bottom: 3rem;
+            background: white;
+            padding: 2rem;
+            border-radius: 1.5rem;
+            box-shadow: 0 18px 40px rgba(15, 23, 42, 0.08);
+        }
 
-.profile-picture {
-    width: 120px;
-    height: 120px;
-    border-radius: 50%;
-    background: #e9ecef;
-    border: 4px solid #FF7A3D;
-    margin: 0 auto 1rem;
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    overflow: hidden;
-    box-shadow: 0 4px 12px rgba(0, 0, 0, 0.15);
-}
+        .profile-avatar {
+            width: 120px;
+            height: 120px;
+            background: linear-gradient(135deg, #102a43, #ff7a3d);
+            border-radius: 50%;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            color: white;
+            font-size: 3rem;
+            flex-shrink: 0;
+        }
 
-.profile-picture img {
-    width: 100%;
-    height: 100%;
-    object-fit: cover;
-}
+        .profile-info h1 {
+            font-size: 2rem;
+            color: #102a43;
+            margin: 0 0 0.5rem 0;
+        }
 
-.profile-picture-placeholder {
-    font-size: 3rem;
-    color: #6c757d;
-}
+        .profile-info p {
+            color: #64748b;
+            margin: 0.25rem 0;
+        }
 
-.edit-profile-link {
-    display: inline-flex;
-    align-items: center;
-    gap: 0.5rem;
-    color: #FF7A3D;
-    text-decoration: none;
-    font-weight: 600;
-    font-size: 1rem;
-    transition: color 0.2s ease;
-}
+        .profile-form {
+            background: white;
+            padding: 2rem;
+            border-radius: 1.5rem;
+            box-shadow: 0 18px 40px rgba(15, 23, 42, 0.08);
+        }
 
-.edit-profile-link:hover {
-    color: #FF6B1F;
-}
+        .form-group {
+            margin-bottom: 1.5rem;
+        }
 
-.profile-form {
-    margin-top: 2rem;
-}
+        .form-group label {
+            display: block;
+            margin-bottom: 0.5rem;
+            color: #102a43;
+            font-weight: 700;
+            font-size: 0.95rem;
+        }
 
-.form-group {
-    margin-bottom: 1.5rem;
-}
+        .form-group input {
+            width: 100%;
+            padding: 1rem;
+            border: 2px solid #e2e8f0;
+            border-radius: 0.75rem;
+            font-size: 1rem;
+            transition: all 0.3s ease;
+            box-sizing: border-box;
+        }
 
-.form-group label {
-    display: block;
-    margin-bottom: 0.5rem;
-    font-weight: 600;
-    color: #495057;
-    font-size: 0.95rem;
-}
+        .form-group input:focus {
+            outline: none;
+            border-color: #ff7a3d;
+            box-shadow: 0 0 0 3px rgba(255, 122, 61, 0.1);
+        }
 
-.form-group input {
-    width: 100%;
-    padding: 0.75rem 1rem;
-    border: 2px solid #e9ecef;
-    border-radius: 12px;
-    font-size: 1rem;
-    transition: border-color 0.2s ease, box-shadow 0.2s ease;
-    background: white;
-}
+        .form-actions {
+            display: flex;
+            gap: 1rem;
+            margin-top: 2rem;
+        }
 
-.form-group input:focus {
-    outline: none;
-    border-color: #FF7A3D;
-    box-shadow: 0 0 0 3px rgba(255, 122, 61, 0.1);
-}
+        .btn-primary {
+            background: #ff7a3d;
+            color: white;
+            border: none;
+            padding: 1rem 2rem;
+            border-radius: 999px;
+            cursor: pointer;
+            font-weight: 700;
+            font-size: 1rem;
+            transition: all 0.3s ease;
+        }
 
-.profile-content {
-    background: white;
-    border-radius: 16px;
-    padding: 2rem;
-    box-shadow: 0 4px 12px rgba(0, 0, 0, 0.08);
-}
+        .btn-primary:hover {
+            background: #ff6b1f;
+        }
 
-.profile-tabs {
-    display: flex;
-    gap: 1rem;
-    margin-bottom: 2rem;
-    border-bottom: 2px solid #f1f3f4;
-}
+        .btn-secondary {
+            background: #e2e8f0;
+            color: #102a43;
+            border: none;
+            padding: 1rem 2rem;
+            border-radius: 999px;
+            cursor: pointer;
+            font-weight: 700;
+            font-size: 1rem;
+            transition: all 0.3s ease;
+        }
 
-.tab-button {
-    padding: 1rem 2rem;
-    background: none;
-    border: none;
-    border-bottom: 3px solid transparent;
-    color: #6c757d;
-    font-weight: 600;
-    font-size: 1rem;
-    cursor: pointer;
-    transition: all 0.2s ease;
-    margin-bottom: -2px;
-}
+        .btn-secondary:hover {
+            background: #cbd5e1;
+        }
 
-.tab-button.active {
-    color: #FF7A3D;
-    border-bottom-color: #FF7A3D;
-}
+        @media (max-width: 768px) {
+            .profile-header {
+                flex-direction: column;
+                text-align: center;
+            }
 
-.tab-button:hover {
-    color: #FF7A3D;
-}
+            .profile-info h1 {
+                font-size: 1.5rem;
+            }
 
-.tab-content {
-    min-height: 400px;
-}
+            .form-actions {
+                flex-direction: column;
+            }
 
-.booking-section {
-    background: #f8f9fa;
-    border-radius: 12px;
-    padding: 1.5rem;
-    margin-bottom: 1.5rem;
-    border: 1px solid #e9ecef;
-}
-
-.booking-section h3 {
-    margin: 0 0 1rem 0;
-    color: #495057;
-    font-size: 1.1rem;
-    font-weight: 600;
-}
-
-.booking-placeholder {
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    height: 120px;
-    background: white;
-    border-radius: 8px;
-    color: #6c757d;
-    font-style: italic;
-    border: 2px dashed #dee2e6;
-}
-
-@media (max-width: 768px) {
-    .profile-container {
-        grid-template-columns: 1fr;
-        padding: 1rem;
-    }
-    
-    .profile-sidebar {
-        order: 2;
-    }
-    
-    .profile-content {
-        order: 1;
-    }
-    
-    .profile-tabs {
-        flex-direction: column;
-    }
-    
-    .tab-button {
-        text-align: left;
-        border-bottom: 1px solid #e9ecef;
-        border-left: 3px solid transparent;
-    }
-    
-    .tab-button.active {
-        border-bottom-color: #e9ecef;
-        border-left-color: #FF7A3D;
-    }
-}
-</style>
-
-<div class="profile-container">
-    <!-- Profile Sidebar -->
-    <div class="profile-sidebar">
-        <div class="profile-picture-container">
-            <div class="profile-picture">
-                <?php if (!empty($_SESSION['user_avatar'])): ?>
-                    <img src="<?php echo htmlspecialchars($_SESSION['user_avatar']); ?>" alt="Profile Picture">
-                <?php else: ?>
-                    <div class="profile-picture-placeholder">
-                        <i class="fas fa-user"></i>
-                    </div>
-                <?php endif; ?>
+            .btn-primary, .btn-secondary {
+                width: 100%;
+            }
+        }
+    </style>
+</head>
+<body>
+    <main class="profile-page">
+        <div class="profile-header">
+            <div class="profile-avatar">
+                <i class="fas fa-user"></i>
             </div>
-            <a href="#" class="edit-profile-link" onclick="enableEditProfile(); return false;">
-                <i class="fas fa-edit"></i>
-                Edit Profile
-            </a>
-        </div>
-        
-        <form class="profile-form" id="profileForm" method="POST" action="<?php echo SITE_URL; ?>controllers/AuthController.php">
-            <input type="hidden" name="action" value="update_profile">
-            
-            <div class="form-group">
-                <label for="name">Name</label>
-                <input type="text" id="name" name="name" value="<?php echo htmlspecialchars($_SESSION['user_name'] ?? ''); ?>" readonly>
-            </div>
-            
-            <div class="form-group">
-                <label for="email">Email</label>
-                <input type="email" id="email" name="email" value="<?php echo htmlspecialchars($currentUser['email'] ?? ''); ?>" readonly>
-            </div>
-            
-            <div class="form-group">
-                <label for="phone">PH no</label>
-                <input type="tel" id="phone" name="phone" value="<?php echo htmlspecialchars($currentUser['phone'] ?? ''); ?>" readonly>
-            </div>
-        </form>
-    </div>
-    
-    <!-- Profile Content -->
-    <div class="profile-content">
-        <div class="profile-tabs">
-            <button class="tab-button active" onclick="switchTab('past', this)">Past</button>
-            <button class="tab-button" onclick="switchTab('cancelled', this)">Cancelled</button>
-        </div>
-        
-        <div class="tab-content">
-            <!-- Past Bookings Tab -->
-            <div id="past-tab" class="tab-pane">
-                <div class="booking-section">
-                    <h3>Past Bookings</h3>
-                    <div class="booking-placeholder">
-                        No past bookings found
-                    </div>
-                </div>
-                
-                <div class="booking-section">
-                    <h3>Recent Activity</h3>
-                    <div class="booking-placeholder">
-                        No recent activity
-                    </div>
-                </div>
-            </div>
-            
-            <!-- Cancelled Bookings Tab -->
-            <div id="cancelled-tab" class="tab-pane" style="display: none;">
-                <div class="booking-section">
-                    <h3>Cancelled Bookings</h3>
-                    <div class="booking-placeholder">
-                        No cancelled bookings found
-                    </div>
-                </div>
-                
-                <div class="booking-section">
-                    <h3>Cancellation History</h3>
-                    <div class="booking-placeholder">
-                        No cancellation history
-                    </div>
-                </div>
+            <div class="profile-info">
+                <h1><?php echo htmlspecialchars($currentUser['fullname'] ?? 'User'); ?></h1>
+                <p><i class="fas fa-envelope"></i> <?php echo htmlspecialchars($currentUser['email'] ?? 'N/A'); ?></p>
+                <p><i class="fas fa-phone"></i> <?php echo htmlspecialchars($currentUser['phone'] ?? 'N/A'); ?></p>
             </div>
         </div>
-    </div>
-</div>
 
-<script>
-function switchTab(tabName, buttonElement) {
-    // Remove active class from all tabs and buttons
-    const allTabs = document.querySelectorAll('.tab-pane');
-    const allButtons = document.querySelectorAll('.tab-button');
-    
-    allTabs.forEach(tab => tab.style.display = 'none');
-    allButtons.forEach(btn => btn.classList.remove('active'));
-    
-    // Show selected tab and activate button
-    document.getElementById(tabName + '-tab').style.display = 'block';
-    buttonElement.classList.add('active');
-}
+        <div class="profile-form">
+            <h2 style="color: #102a43; margin-top: 0;">Edit Profile</h2>
+            
+            <?php echo $updateMessage; ?>
 
-function enableEditProfile() {
-    const form = document.getElementById('profileForm');
-    const inputs = form.querySelectorAll('input[type="text"], input[type="email"], input[type="tel"]');
-    
-    inputs.forEach(input => {
-        input.removeAttribute('readonly');
-        input.style.background = '#fff';
-        input.style.borderColor = '#FF7A3D';
-    });
-    
-    // Add save button
-    const saveButton = document.createElement('button');
-    saveButton.type = 'submit';
-    saveButton.className = 'btn-primary';
-    saveButton.style.cssText = 'width: 100%; padding: 0.75rem; background: #FF7A3D; color: white; border: none; border-radius: 8px; font-weight: 600; cursor: pointer; margin-top: 1rem;';
-    saveButton.textContent = 'Save Changes';
-    saveButton.onclick = function() {
-        form.submit();
-    };
-    
-    // Remove existing save button if any
-    const existingSaveButton = form.querySelector('button[type="submit"]');
-    if (existingSaveButton) {
-        existingSaveButton.remove();
-    }
-    
-    form.appendChild(saveButton);
-    
-    // Focus on first input
-    inputs[0].focus();
-}
+            <form method="POST">
+                <div class="form-group">
+                    <label for="fullname">Full Name</label>
+                    <input 
+                        type="text" 
+                        id="fullname" 
+                        name="fullname" 
+                        value="<?php echo htmlspecialchars($currentUser['fullname'] ?? ''); ?>" 
+                        required
+                    >
+                </div>
 
-// Initialize page
-document.addEventListener('DOMContentLoaded', function() {
-    // You can add any initialization code here
-});
-</style>
+                <div class="form-group">
+                    <label for="email">Email Address</label>
+                    <input 
+                        type="email" 
+                        id="email" 
+                        name="email" 
+                        value="<?php echo htmlspecialchars($currentUser['email'] ?? ''); ?>" 
+                        required
+                    >
+                </div>
 
-<?php require_once __DIR__ . '/../includes/footer.php'; ?>
+                <div class="form-group">
+                    <label for="phone">Phone Number</label>
+                    <input 
+                        type="tel" 
+                        id="phone" 
+                        name="phone" 
+                        value="<?php echo htmlspecialchars($currentUser['phone'] ?? ''); ?>" 
+                        required
+                    >
+                </div>
+
+                <div class="form-actions">
+                    <button type="submit" class="btn-primary">Save Changes</button>
+                    <button type="button" class="btn-secondary" onclick="window.history.back()">Cancel</button>
+                </div>
+            </form>
+        </div>
+    </main>
+</body>
+</html>

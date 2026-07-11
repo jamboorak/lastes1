@@ -147,50 +147,19 @@ if (!isset($user_data['email'])) {
     die('Failed to get user information.');
 }
 
-// Process user login/registration
-require_once 'models/User.php';
-$userModel = new User();
-
-// Check if user exists
-$existingUser = $userModel->getUserByEmail($user_data['email']);
-
-if ($existingUser) {
-    // User exists, log them in
-    $_SESSION['user_id'] = $existingUser['id'];
-    $_SESSION['user_email'] = $existingUser['email'];
-    $_SESSION['user_name'] = $existingUser['fullname'];
-    $_SESSION['logged_in'] = true;
-    $_SESSION['login_time'] = time();
-} else {
-    // Create a new social-login user account using the model's supported method
-    $userId = $userModel->createSocialUser([
-        'name' => $user_data['name'],
-        'email' => $user_data['email'],
-        'google_id' => $user_data['id'],
-        'avatar' => $user_data['picture'] ?? null,
-        'email_verified' => 1,
-        'registration_method' => 'google'
-    ]);
-
-    if ($userId) {
-        $_SESSION['user_id'] = $userId;
-        $_SESSION['user_email'] = $user_data['email'];
-        $_SESSION['user_name'] = $user_data['name'];
-        $_SESSION['logged_in'] = true;
-        $_SESSION['login_time'] = time();
-    } else {
-        $_SESSION['login_error'] = 'Google login failed: Unable to create your account.';
-        header('Location: ' . $redirect_url);
-        exit;
-    }
-}
+// Store user data in session for OTP verification
+$_SESSION['google_user_data'] = $user_data;
+$_SESSION['google_user_data']['google_id'] = $user_data['id'];
+$_SESSION['google_user_data']['avatar'] = $user_data['picture'] ?? null;
+$_SESSION['google_user_data']['email_verified'] = 1;
+$_SESSION['google_user_data']['registration_method'] = 'google';
 
 // Clear OAuth state
 unset($_SESSION['oauth_state']);
 
-// Redirect to dashboard or intended page
-$redirect_url = $_SESSION['redirect_after_login'] ?? 'index.php';
-unset($_SESSION['redirect_after_login']);
+// Redirect to OTP verification page
+header('Location: otp-verification.php');
+exit;
 
 ?>
 <!DOCTYPE html>

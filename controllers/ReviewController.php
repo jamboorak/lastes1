@@ -22,7 +22,7 @@ class ReviewController {
     public function requireAuth() {
         if (!$this->user->isLoggedIn()) {
             $_SESSION['error'] = 'Please login to submit a review';
-            header("Location: google-auth.php?action=login");
+            header("Location: ../google-auth.php?action=login");
             exit();
         }
     }

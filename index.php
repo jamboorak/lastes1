@@ -1,6 +1,20 @@
 <?php
 require_once 'includes/header.php';
 
+function resolveImageUrl($imageUrl, $default = '') {
+    if (empty($imageUrl)) {
+        return $default;
+    }
+    $imageUrl = trim($imageUrl);
+    if (preg_match('/^https?:\/\//i', $imageUrl)) {
+        return $imageUrl;
+    }
+    if (strpos($imageUrl, '/') === 0) {
+        return rtrim(SITE_URL, '/') . $imageUrl;
+    }
+    return SITE_URL . $imageUrl;
+}
+
 $db = new Database();
 $conn = $db->getConnection();
 $conn->query("CREATE TABLE IF NOT EXISTS cottages (id INT(11) AUTO_INCREMENT PRIMARY KEY, name VARCHAR(100) NOT NULL, description TEXT, capacity INT(11) NOT NULL, price_per_night DECIMAL(10,2) NOT NULL, image_url VARCHAR(255), available BOOLEAN DEFAULT TRUE)");
@@ -91,7 +105,7 @@ $publicPools = $publicPoolsResult ? $publicPoolsResult->fetch_all(MYSQLI_ASSOC) 
                             <?php foreach ($publicRooms as $index => $room): ?>
                             <div class="room-card room-card-<?php echo $index; ?>" style="position: absolute; top: 0; left: 50%; width: 360px; height: 480px; transform-style: preserve-3d; transform-origin: center center; transition: transform 0.8s ease, opacity 0.8s ease;">
                                 <div style="width: 100%; height: 100%; border-radius: 28px; overflow: hidden; box-shadow: 0 28px 60px rgba(15, 23, 42, 0.14); background: #fff; display: flex; flex-direction: column;">
-                                    <img src="<?php echo htmlspecialchars(!empty($room['image_url']) ? $room['image_url'] : 'images/standard.jpg'); ?>" alt="<?php echo htmlspecialchars($room['name'] ?? 'Room'); ?>" style="width: 100%; height: 220px; object-fit: cover; display: block; flex-shrink: 0;">
+                                    <img src="<?php echo htmlspecialchars(resolveImageUrl($room['image_url'] ?? '', SITE_URL . 'images/standard.jpg')); ?>" alt="<?php echo htmlspecialchars($room['name'] ?? 'Room'); ?>" style="width: 100%; height: 220px; object-fit: cover; display: block; flex-shrink: 0;">
                                     <div style="padding: 1.5rem; flex: 1; display: flex; flex-direction: column;">
                                         <h3 style="color: var(--primary-blue); font-size: 1.6rem; margin-bottom: 0.75rem; margin-top: 0;"><?php echo htmlspecialchars($room['name'] ?? 'Room'); ?></h3>
                                         <p style="color: #475569; line-height: 1.6; margin-bottom: 0.75rem; margin-top: 0;">Good for <?php echo (int)($room['capacity'] ?? 0); ?> pax • <?php echo !empty($room['available']) ? 'Available' : 'Unavailable'; ?></p>

@@ -269,6 +269,23 @@ if ($conn->query($sql) === TRUE) {
     echo "Error creating table 'reservation_limits': " . $conn->error . "<br>";
 }
 
+// Create otp_codes table for storing OTP verification codes
+$sql = "CREATE TABLE IF NOT EXISTS otp_codes (
+    id INT(11) AUTO_INCREMENT PRIMARY KEY,
+    email VARCHAR(150) NOT NULL,
+    otp_code VARCHAR(6) NOT NULL,
+    user_data TEXT NULL,
+    expires_at DATETIME NOT NULL,
+    is_used TINYINT(1) DEFAULT 0,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+)";
+
+if ($conn->query($sql) === TRUE) {
+    echo "Table 'otp_codes' created successfully or already exists<br>";
+} else {
+    echo "Error creating table 'otp_codes': " . $conn->error . "<br>";
+}
+
 // Create admin account for admin login
 $adminEmail = 'adminvillasoledad@gmail.com';
 $adminPassword = 'admin123';

@@ -406,7 +406,13 @@ $userReviews = $reviewResult->fetch_all(MYSQLI_ASSOC);
                                     ★
                                 <?php endfor; ?>
                             </div>
-                            <p><?php echo htmlspecialchars($review['comment']); ?></p>
+                            <?php
+                                $userReviewText = trim((string)($review['review_text'] ?? $review['comment'] ?? $review['text'] ?? ''));
+                                if ($userReviewText === '') {
+                                    $userReviewText = '(No comment provided)';
+                                }
+                            ?>
+                            <p><?php echo htmlspecialchars($userReviewText); ?></p>
                             <small style="color: var(--text-light);"><?php echo date('M d, Y', strtotime($review['created_at'])); ?></small>
                         </div>
                         <?php endforeach; ?>

@@ -22,7 +22,7 @@ class AuthController {
      */
     public function register() {
         if ($_SERVER['REQUEST_METHOD'] !== 'POST') {
-            $this->redirect('google-auth.php?action=login');
+            $this->redirect('../google-auth.php?action=login');
             return;
         }
         
@@ -35,11 +35,11 @@ class AuthController {
         
         if ($result['success']) {
             $_SESSION['success'] = $result['message'];
-            $this->redirect('google-auth.php?action=login');
+            $this->redirect('../google-auth.php?action=login');
         } else {
             $_SESSION['error'] = $result['message'];
             $_SESSION['form_data'] = $_POST;
-            $this->redirect('google-auth.php?action=login');
+            $this->redirect('../google-auth.php?action=login');
         }
     }
     
@@ -48,7 +48,7 @@ class AuthController {
      */
     public function login() {
         if ($_SERVER['REQUEST_METHOD'] !== 'POST') {
-            $this->redirect('google-auth.php?action=login');
+            $this->redirect('../google-auth.php?action=login');
             return;
         }
         
@@ -59,11 +59,11 @@ class AuthController {
         
         if ($result['success']) {
             $_SESSION['success'] = $result['message'];
-            $this->redirect('index.php');
+            $this->redirect('../index.php');
         } else {
             $_SESSION['error'] = $result['message'];
             $_SESSION['form_data'] = $_POST;
-            $this->redirect('google-auth.php?action=login');
+            $this->redirect('../google-auth.php?action=login');
         }
     }
     
@@ -88,12 +88,12 @@ class AuthController {
     public function updateProfile() {
         if (!$this->user->isLoggedIn()) {
             $_SESSION['error'] = 'Please login to update your profile';
-            $this->redirect('google-auth.php?action=login');
+            $this->redirect('../google-auth.php?action=login');
             return;
         }
         
         if ($_SERVER['REQUEST_METHOD'] !== 'POST') {
-            $this->redirect('profile.php');
+            $this->redirect('../profile.php');
             return;
         }
         
@@ -111,7 +111,7 @@ class AuthController {
             $_SESSION['form_data'] = $_POST;
         }
         
-        $this->redirect('profile.php');
+        $this->redirect('../profile.php');
     }
     
     /**
@@ -120,12 +120,12 @@ class AuthController {
     public function changePassword() {
         if (!$this->user->isLoggedIn()) {
             $_SESSION['error'] = 'Please login to change your password';
-            $this->redirect('google-auth.php?action=login');
+            $this->redirect('../google-auth.php?action=login');
             return;
         }
         
         if ($_SERVER['REQUEST_METHOD'] !== 'POST') {
-            $this->redirect('profile.php');
+            $this->redirect('../profile.php');
             return;
         }
         
@@ -136,7 +136,7 @@ class AuthController {
         
         if ($newPassword !== $confirmPassword) {
             $_SESSION['error'] = 'New password and confirm password do not match';
-            $this->redirect('profile.php');
+            $this->redirect('../profile.php');
             return;
         }
         
@@ -148,7 +148,7 @@ class AuthController {
             $_SESSION['error'] = $result['message'];
         }
         
-        $this->redirect('profile.php');
+        $this->redirect('../profile.php');
     }
     
     /**
@@ -157,7 +157,7 @@ class AuthController {
     public function requireAuth() {
         if (!$this->user->isLoggedIn()) {
             $_SESSION['error'] = 'Please login to continue';
-            $this->redirect('google-auth.php?action=login');
+            $this->redirect('../google-auth.php?action=login');
             exit();
         }
     }
@@ -206,7 +206,7 @@ if (isset($_GET['action'])) {
             $controller->changePassword();
             break;
         default:
-            header("Location: index.php");
+            header("Location: ../index.php");
             exit();
     }
 }

@@ -739,6 +739,7 @@ foreach ($reservations as &$reservation) {
                             <th>Reservation ID</th>
                             <th>Customer</th>
                             <th>Details</th>
+                            <th>Tour Hours</th>
                             <th>Amount</th>
                             <th>Status</th>
                             <th>Actions</th>
@@ -770,6 +771,17 @@ foreach ($reservations as &$reservation) {
                                             <p><strong>Tour:</strong> <?php echo ucfirst($reservation['tour_type']); ?></p>
                                             <p><strong>Guests:</strong> <?php echo $reservation['adults'] + $reservation['children'] + $reservation['seniors']; ?></p>
                                             <p><strong>Items:</strong> <?php echo count($reservation['items']); ?></p>
+                                        </div>
+                                    </td>
+                                    <td>
+                                        <div class="reservation-details">
+                                            <?php if ($reservation['tour_type'] === 'day'): ?>
+                                                <p><strong>Check-in:</strong> 8:00 AM</p>
+                                                <p><strong>Check-out:</strong> 5:00 PM</p>
+                                            <?php else: ?>
+                                                <p><strong>Check-in:</strong> 8:00 PM</p>
+                                                <p><strong>Check-out:</strong> 5:00 AM (next day)</p>
+                                            <?php endif; ?>
                                         </div>
                                     </td>
                                     <td><strong>₱<?php echo number_format($reservation['total_amount'], 2); ?></strong></td>

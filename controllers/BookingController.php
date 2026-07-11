@@ -22,7 +22,7 @@ class BookingController {
     public function requireAuth() {
         if (!$this->user->isLoggedIn()) {
             $_SESSION['error'] = 'Please login to make a booking';
-            header("Location: google-auth.php?action=login");
+            header("Location: ../google-auth.php?action=login");
             exit();
         }
     }
@@ -34,7 +34,7 @@ class BookingController {
         $this->requireAuth();
         
         if ($_SERVER['REQUEST_METHOD'] !== 'POST') {
-            $this->redirect('booking.php');
+            $this->redirect('../booking.php');
             return;
         }
         
@@ -51,11 +51,11 @@ class BookingController {
         
         if ($result['success']) {
             $_SESSION['success'] = $result['message'];
-            $this->redirect('my-bookings.php');
+            $this->redirect('../my-bookings.php');
         } else {
             $_SESSION['error'] = $result['message'];
             $_SESSION['form_data'] = $_POST;
-            $this->redirect('booking.php');
+            $this->redirect('../booking.php');
         }
     }
     
@@ -100,7 +100,7 @@ class BookingController {
             $_SESSION['error'] = $result['message'];
         }
         
-        $this->redirect('my-bookings.php');
+        $this->redirect('../my-bookings.php');
     }
     
     /**
@@ -126,7 +126,7 @@ class BookingController {
             $_SESSION['error'] = $result['message'];
         }
         
-        $this->redirect('admin/bookings.php');
+        $this->redirect('../admin/bookings.php');
     }
     
     /**
@@ -197,7 +197,7 @@ class BookingController {
         // For now, we'll assume user ID 1 is admin
         if ($_SESSION['user_id'] != 1) {
             $_SESSION['error'] = 'Access denied. Admin privileges required.';
-            header("Location: index.php");
+            header("Location: ../index.php");
             exit();
         }
     }
@@ -229,7 +229,7 @@ if (isset($_GET['action'])) {
             $controller->updateStatus($bookingId, $status);
             break;
         default:
-            header("Location: index.php");
+            header("Location: ../index.php");
             exit();
     }
 }
