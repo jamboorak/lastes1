@@ -134,7 +134,8 @@ $sql = "CREATE TABLE IF NOT EXISTS cottages (
     capacity INT(11) NOT NULL,
     price_per_night DECIMAL(10,2) NOT NULL,
     image_url VARCHAR(255),
-    available BOOLEAN DEFAULT TRUE
+    available BOOLEAN DEFAULT TRUE,
+    daily_slots INT(11) DEFAULT 1
 )";
 
 if ($conn->query($sql) === TRUE) {
@@ -151,7 +152,8 @@ $sql = "CREATE TABLE IF NOT EXISTS rooms (
     capacity INT(11) NOT NULL,
     price_per_night DECIMAL(10,2) NOT NULL,
     image_url VARCHAR(255),
-    available BOOLEAN DEFAULT TRUE
+    available BOOLEAN DEFAULT TRUE,
+    daily_slots INT(11) DEFAULT 1
 )";
 
 if ($conn->query($sql) === TRUE) {

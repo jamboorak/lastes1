@@ -739,6 +739,7 @@ foreach ($reservations as &$reservation) {
                             <th>Reservation ID</th>
                             <th>Customer</th>
                             <th>Details</th>
+                            <th>Guests</th>
                             <th>Tour Hours</th>
                             <th>Amount</th>
                             <th>Status</th>
@@ -769,8 +770,15 @@ foreach ($reservations as &$reservation) {
                                                 }
                                             ?></p>
                                             <p><strong>Tour:</strong> <?php echo ucfirst($reservation['tour_type']); ?></p>
-                                            <p><strong>Guests:</strong> <?php echo $reservation['adults'] + $reservation['children'] + $reservation['seniors']; ?></p>
                                             <p><strong>Items:</strong> <?php echo count($reservation['items']); ?></p>
+                                        </div>
+                                    </td>
+                                    <td>
+                                        <div class="reservation-details">
+                                            <p><strong>Adults:</strong> <?php echo $reservation['adults']; ?></p>
+                                            <p><strong>Children:</strong> <?php echo $reservation['children']; ?></p>
+                                            <p><strong>Seniors:</strong> <?php echo $reservation['seniors']; ?></p>
+                                            <p><strong>Total:</strong> <?php echo $reservation['adults'] + $reservation['children'] + $reservation['seniors']; ?></p>
                                         </div>
                                     </td>
                                     <td>
@@ -817,7 +825,7 @@ foreach ($reservations as &$reservation) {
                             <?php endforeach; ?>
                         <?php else: ?>
                             <tr>
-                                <td colspan="6" style="text-align: center; padding: 2rem; color: var(--text-light);">
+                                <td colspan="7" style="text-align: center; padding: 2rem; color: var(--text-light);">
                                     <i class="fas fa-calendar-xmark" style="font-size: 2rem; margin-bottom: 1rem; display: block;"></i>
                                     <p>No reservations found</p>
                                 </td>

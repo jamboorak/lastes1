@@ -201,6 +201,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         $description = trim($_POST['room_description'] ?? '');
         $capacity = max(1, (int)($_POST['room_capacity'] ?? 1));
         $pricePerNight = (float)($_POST['room_price'] ?? 0);
+        $dailySlots = max(1, (int)($_POST['room_slots'] ?? 1));
         $available = isset($_POST['room_available']) ? 1 : 0;
         
         // Handle file upload
@@ -228,14 +229,14 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             $errorMessage = 'Room name is required.';
         } else {
             $stmt = $roomId > 0
-                ? $conn->prepare('UPDATE rooms SET name = ?, description = ?, capacity = ?, price_per_night = ?, image_url = ?, available = ? WHERE id = ?')
-                : $conn->prepare('INSERT INTO rooms (name, description, capacity, price_per_night, image_url, available) VALUES (?, ?, ?, ?, ?, ?)');
+                ? $conn->prepare('UPDATE rooms SET name = ?, description = ?, capacity = ?, price_per_night = ?, image_url = ?, available = ?, daily_slots = ? WHERE id = ?')
+                : $conn->prepare('INSERT INTO rooms (name, description, capacity, price_per_night, image_url, available, daily_slots) VALUES (?, ?, ?, ?, ?, ?, ?)');
 
             if ($stmt) {
                 if ($roomId > 0) {
-                    $stmt->bind_param('ssidsii', $roomName, $description, $capacity, $pricePerNight, $imageUrl, $available, $roomId);
+                    $stmt->bind_param('ssidsiii', $roomName, $description, $capacity, $pricePerNight, $imageUrl, $available, $dailySlots, $roomId);
                 } else {
-                    $stmt->bind_param('ssidsi', $roomName, $description, $capacity, $pricePerNight, $imageUrl, $available);
+                    $stmt->bind_param('ssidsii', $roomName, $description, $capacity, $pricePerNight, $imageUrl, $available, $dailySlots);
                 }
 
                 if ($stmt->execute()) {
@@ -273,6 +274,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             $description = trim($_POST['cottage_description'] ?? '');
             $capacity = max(1, (int)($_POST['cottage_capacity'] ?? 1));
             $pricePerNight = (float)($_POST['cottage_price'] ?? 0);
+            $dailySlots = max(1, (int)($_POST['cottage_slots'] ?? 1));
             $available = isset($_POST['cottage_available']) ? 1 : 0;
             
             // Handle file upload
@@ -300,14 +302,14 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                 $cottageErrorMessage = 'Cottage name is required.';
             } else {
                 $stmt = $cottageId > 0
-                    ? $conn->prepare('UPDATE cottages SET name = ?, description = ?, capacity = ?, price_per_night = ?, image_url = ?, available = ? WHERE id = ?')
-                    : $conn->prepare('INSERT INTO cottages (name, description, capacity, price_per_night, image_url, available) VALUES (?, ?, ?, ?, ?, ?)');
+                    ? $conn->prepare('UPDATE cottages SET name = ?, description = ?, capacity = ?, price_per_night = ?, image_url = ?, available = ?, daily_slots = ? WHERE id = ?')
+                    : $conn->prepare('INSERT INTO cottages (name, description, capacity, price_per_night, image_url, available, daily_slots) VALUES (?, ?, ?, ?, ?, ?, ?)');
 
                 if ($stmt) {
                     if ($cottageId > 0) {
-                        $stmt->bind_param('ssidsii', $cottageName, $description, $capacity, $pricePerNight, $imageUrl, $available, $cottageId);
+                        $stmt->bind_param('ssidsiii', $cottageName, $description, $capacity, $pricePerNight, $imageUrl, $available, $dailySlots, $cottageId);
                     } else {
-                        $stmt->bind_param('ssidsi', $cottageName, $description, $capacity, $pricePerNight, $imageUrl, $available);
+                        $stmt->bind_param('ssidsii', $cottageName, $description, $capacity, $pricePerNight, $imageUrl, $available, $dailySlots);
                     }
 
                     if ($stmt->execute()) {
@@ -745,6 +747,18 @@ $reviews = $reviewsResult->fetch_all(MYSQLI_ASSOC);
             margin-bottom: 1rem;
         }
 
+        .rooms-container {
+            display: grid;
+            grid-template-columns: repeat(auto-fill, minmax(250px, 1fr));
+            gap: 1.5rem;
+        }
+
+        .cottages-container {
+            display: grid;
+            grid-template-columns: repeat(auto-fill, minmax(250px, 1fr));
+            gap: 1.5rem;
+        }
+
         .room-card-header {
             display: flex;
             justify-content: space-between;
@@ -1065,14 +1079,114 @@ $reviews = $reviewsResult->fetch_all(MYSQLI_ASSOC);
 
                     <div style="display:flex; justify-content:space-between; align-items:center; gap:1rem; margin-bottom: 1.5rem; flex-wrap:wrap;">
                         <button class="btn-primary" onclick="openAddRoomModal()"><i class="fas fa-plus"></i> Add New Room</button>
+                        
+                        <?php
+                        require_once '../config/RoomConfig.php';
+                        $selectedDate = $_GET['date'] ?? null;
+                        
+                        if ($selectedDate): ?>
+                        <div style="background: #e0f2fe; padding: 0.5rem 1rem; border-radius: 6px; border-left: 4px solid var(--primary-blue);">
+                            <strong>Selected Date:</strong> <?php echo date('F d, Y', strtotime($selectedDate)); ?>
+                            <a href="dashboard.php?section=rooms" style="background: none; border: none; color: var(--primary-blue); cursor: pointer; margin-left: 0.5rem; text-decoration: underline; font-size: 0.85rem;">Clear</a>
+                        </div>
+                        <?php endif; ?>
+                        
+                        <button class="btn-primary" onclick="openDateModal()" style="background: var(--primary-blue);"><i class="fas fa-calendar"></i> Check Availability</button>
                         <?php if (!empty($editingRoom)): ?>
                             <a href="dashboard.php?section=rooms" class="btn-small btn-delete" style="text-decoration:none;">Cancel Edit</a>
                         <?php endif; ?>
                     </div>
 
+                    <?php
+                    // Calculate remaining slots for each room on selected date
+                    $roomAvailability = [];
+                    if ($selectedDate) {
+                        foreach ($rooms as $room) {
+                            $roomName = $room['name'];
+                            $limit = $room['daily_slots'] ?? 1;
+                            
+                            // Count existing reservations for this room on selected date
+                            $countSql = "SELECT COUNT(*) as count 
+                                        FROM reservation_items ri 
+                                        JOIN reservations r ON ri.reservation_id = r.id 
+                                        WHERE ri.item_name = ? AND ri.item_type = 'room' 
+                                        AND r.check_in = ? AND r.status != 'cancelled'";
+                            $countStmt = $conn->prepare($countSql);
+                            $countStmt->bind_param("ss", $roomName, $selectedDate);
+                            $countStmt->execute();
+                            $countResult = $countStmt->get_result();
+                            $bookedCount = $countResult->fetch_assoc()['count'] ?? 0;
+                            
+                            $remainingSlots = max(0, $limit - $bookedCount);
+                            $roomAvailability[$room['id']] = [
+                                'limit' => $limit,
+                                'booked' => $bookedCount,
+                                'remaining' => $remainingSlots
+                            ];
+                        }
+                    } else {
+                        // Set default availability when no date is selected
+                        foreach ($rooms as $room) {
+                            $limit = $room['daily_slots'] ?? 1;
+                            $roomAvailability[$room['id']] = [
+                                'limit' => $limit,
+                                'booked' => 0,
+                                'remaining' => $limit
+                            ];
+                        }
+                    }
+                    ?>
+
                     <?php if (!empty($errorMessage)): ?>
                         <div style="background:#fee2e2; color:#991b1b; padding:0.75rem 1rem; border-radius:6px; margin-bottom:1rem;"><?php echo htmlspecialchars($errorMessage); ?></div>
                     <?php endif; ?>
+
+                    <div class="rooms-container">
+                    <?php foreach ($rooms as $room): ?>
+                    <?php $availability = $roomAvailability[$room['id']]; ?>
+                    <div class="room-card" style="background: #f3f4f6; border-radius: 12px; padding: 1.5rem; text-align: center;">
+                        <h3 style="color: var(--primary-blue); margin: 0 0 1rem 0; font-size: 1.2rem;"><?php echo htmlspecialchars($room['name'] ?? ''); ?></h3>
+                        
+                        <div style="height: 150px; background: #e5e7eb; border-radius: 8px; display: flex; align-items: center; justify-content: center; margin-bottom: 1rem; overflow: hidden;">
+                            <?php 
+                            $imageUrl = $room['image_url'] ?? '';
+                            if (!empty($imageUrl)): 
+                                if (preg_match('/^https?:\/\//i', $imageUrl)) {
+                                    $displayImage = $imageUrl;
+                                } elseif (strpos($imageUrl, '/') === 0) {
+                                    $displayImage = rtrim(SITE_URL, '/') . $imageUrl;
+                                } else {
+                                    $displayImage = SITE_URL . $imageUrl;
+                                }
+                            ?>
+                                <img src="<?php echo htmlspecialchars($displayImage); ?>" alt="<?php echo htmlspecialchars($room['name']); ?>" style="width: 100%; height: 100%; object-fit: cover;">
+                            <?php else: ?>
+                                <span style="color: #9ca3af; font-size: 0.9rem;">Actual Image</span>
+                            <?php endif; ?>
+                        </div>
+                        
+                        <?php if ($selectedDate): ?>
+                        <div style="background: white; padding: 1rem; border-radius: 8px; margin-bottom: 1rem;">
+                            <div style="color: #64748b; font-size: 0.9rem; margin-bottom: 0.5rem;">Remaining slots</div>
+                            <div style="font-size: 1.5rem; font-weight: 700; color: <?php echo $availability['remaining'] > 0 ? '#10b981' : '#ef4444'; ?>;">
+                                <?php echo $availability['remaining']; ?>
+                            </div>
+                        </div>
+                        <?php else: ?>
+                        <button class="btn-small" style="background: #374151; color: white; border: none; padding: 0.75rem 2rem; border-radius: 8px; cursor: pointer; font-weight: 600; margin-bottom: 1rem;" onclick="openEditRoomModal(<?php echo (int)$room['id']; ?>, '<?php echo str_replace("'", "\\'", htmlspecialchars($room['name'] ?? '', ENT_QUOTES)); ?>', <?php echo (int)($room['capacity'] ?? 0); ?>, <?php echo (float)($room['price_per_night'] ?? 0); ?>, <?php echo (int)($room['daily_slots'] ?? 1); ?>, '<?php echo str_replace("'", "\\'", htmlspecialchars($room['image_url'] ?? '', ENT_QUOTES)); ?>', '<?php echo str_replace("'", "\\'", htmlspecialchars($room['description'] ?? '', ENT_QUOTES)); ?>', <?php echo !empty($room['available']) ? 'true' : 'false'; ?>)">View</button>
+                        <?php endif; ?>
+                        
+                        <div style="display: flex; gap: 0.5rem; justify-content: center;">
+                            <button class="btn-small btn-edit" onclick="openEditRoomModal(<?php echo (int)$room['id']; ?>, '<?php echo str_replace("'", "\\'", htmlspecialchars($room['name'] ?? '', ENT_QUOTES)); ?>', <?php echo (int)($room['capacity'] ?? 0); ?>, <?php echo (float)($room['price_per_night'] ?? 0); ?>, <?php echo (int)($room['daily_slots'] ?? 1); ?>, '<?php echo str_replace("'", "\\'", htmlspecialchars($room['image_url'] ?? '', ENT_QUOTES)); ?>', '<?php echo str_replace("'", "\\'", htmlspecialchars($room['description'] ?? '', ENT_QUOTES)); ?>', <?php echo !empty($room['available']) ? 'true' : 'false'; ?>)">Edit</button>
+                            <form method="post" action="dashboard.php?section=rooms" style="display:inline-block;" onsubmit="return confirm('Delete this room?');">
+                                <input type="hidden" name="room_action" value="delete_room">
+                                <input type="hidden" name="room_id" value="<?php echo (int)$room['id']; ?>">
+                                <button type="submit" class="btn-small btn-delete">Delete</button>
+                            </form>
+                        </div>
+                    </div>
+                    <?php endforeach; ?>
+                    </div>
 
                     <!-- Add Room Modal -->
                     <div id="addRoomModal" style="display:none; position:fixed; top:0; left:0; right:0; bottom:0; background:rgba(0,0,0,0.5); z-index:2000; align-items:center; justify-content:center;">
@@ -1095,6 +1209,11 @@ $reviews = $reviewsResult->fetch_all(MYSQLI_ASSOC);
                                     <div>
                                         <label style="display:block; margin-bottom:0.35rem; font-weight:600;">Price per Night</label>
                                         <input type="number" step="0.01" name="room_price" min="0" value="0" required style="width:100%; padding:0.7rem; border:1px solid var(--border-gray); border-radius:6px;">
+                                    </div>
+                                    <div>
+                                        <label style="display:block; margin-bottom:0.35rem; font-weight:600;">Daily Slots</label>
+                                        <input type="number" name="room_slots" min="1" value="1" required style="width:100%; padding:0.7rem; border:1px solid var(--border-gray); border-radius:6px;">
+                                        <small style="color: var(--text-light); font-size: 0.8rem;">Maximum bookings per day</small>
                                     </div>
                                     <div>
                                         <label style="display:block; margin-bottom:0.35rem; font-weight:600;">Upload Image</label>
@@ -1143,6 +1262,11 @@ $reviews = $reviewsResult->fetch_all(MYSQLI_ASSOC);
                                         <input type="number" step="0.01" name="room_price" id="editRoomPrice" min="0" value="0" required style="width:100%; padding:0.7rem; border:1px solid var(--border-gray); border-radius:6px;">
                                     </div>
                                     <div>
+                                        <label style="display:block; margin-bottom:0.35rem; font-weight:600;">Daily Slots</label>
+                                        <input type="number" name="room_slots" id="editRoomSlots" min="1" value="1" required style="width:100%; padding:0.7rem; border:1px solid var(--border-gray); border-radius:6px;">
+                                        <small style="color: var(--text-light); font-size: 0.8rem;">Maximum bookings per day</small>
+                                    </div>
+                                    <div>
                                         <label style="display:block; margin-bottom:0.35rem; font-weight:600;">Upload New Image (optional)</label>
                                         <input type="file" name="room_image" id="editRoomImage" accept="image/*" style="width:100%; padding:0.7rem; border:1px solid var(--border-gray); border-radius:6px;">
                                     </div>
@@ -1164,25 +1288,6 @@ $reviews = $reviewsResult->fetch_all(MYSQLI_ASSOC);
                             </form>
                         </div>
                     </div>
-
-                    <?php foreach ($rooms as $room): ?>
-                    <div class="room-card">
-                        <div class="room-card-header">
-                            <h3><?php echo htmlspecialchars($room['name'] ?? ''); ?></h3>
-                            <span class="price-badge">₱<?php echo number_format($room['price_per_night'] ?? 0, 2); ?>/night</span>
-                        </div>
-                        <p style="color: var(--text-light); margin: 0.5rem 0;"><?php echo htmlspecialchars($room['description'] ?? ''); ?></p>
-                        <p style="color: var(--text-light); margin: 0.25rem 0 0.75rem; font-size: 0.95rem;">Capacity: <?php echo (int)($room['capacity'] ?? 0); ?> • <?php echo !empty($room['available']) ? 'Available' : 'Unavailable'; ?></p>
-                        <div style="margin-top: 1rem;">
-                            <button class="btn-small btn-edit" onclick="openEditRoomModal(<?php echo (int)$room['id']; ?>, '<?php echo str_replace("'", "\\'", htmlspecialchars($room['name'] ?? '', ENT_QUOTES)); ?>', <?php echo (int)($room['capacity'] ?? 0); ?>, <?php echo (float)($room['price_per_night'] ?? 0); ?>, '<?php echo str_replace("'", "\\'", htmlspecialchars($room['image_url'] ?? '', ENT_QUOTES)); ?>', '<?php echo str_replace("'", "\\'", htmlspecialchars($room['description'] ?? '', ENT_QUOTES)); ?>', <?php echo !empty($room['available']) ? 'true' : 'false'; ?>)">Edit</button>
-                            <form method="post" action="dashboard.php?section=rooms" style="display:inline-block; margin-left:0.5rem;" onsubmit="return confirm('Delete this room?');">
-                                <input type="hidden" name="room_action" value="delete_room">
-                                <input type="hidden" name="room_id" value="<?php echo (int)$room['id']; ?>">
-                                <button type="submit" class="btn-small btn-delete">Delete</button>
-                            </form>
-                        </div>
-                    </div>
-                    <?php endforeach; ?>
                 </div>
 
                 <!-- View Bookings Section -->
@@ -1249,47 +1354,167 @@ $reviews = $reviewsResult->fetch_all(MYSQLI_ASSOC);
                 <div id="statistics" class="admin-section">
                     <h2 class="section-title"><i class="fas fa-bar-chart"></i> Statistics</h2>
                     
-                    <div class="chart-container">
-                        <h3>Monthly Bookings</h3>
-                        <p style="color: var(--text-light);">Showing bookings for the current year</p>
-                        <table style="margin-top: 1rem;">
-                            <thead>
-                                <tr>
-                                    <th>Month</th>
-                                    <th>Number of Bookings</th>
-                                    <th>Percentage</th>
-                                </tr>
-                            </thead>
-                            <tbody>
-                                <?php 
-                                $monthlyData = $conn->query("SELECT MONTH(check_in) as month, COUNT(*) as count FROM reservations WHERE YEAR(check_in) = YEAR(NOW()) AND COALESCE(NULLIF(status, ''), 'pending') IN ('approved','completed') GROUP BY MONTH(check_in) ORDER BY month")->fetch_all(MYSQLI_ASSOC);
-                                $months = ['January', 'February', 'March', 'April', 'May', 'June', 'July', 'August', 'September', 'October', 'November', 'December'];
-                                $totalMonthly = array_sum(array_column($monthlyData, 'count'));
-                                
-                                foreach ($monthlyData as $data):
-                                    $percentage = $totalMonthly > 0 ? round(($data['count'] / $totalMonthly) * 100, 1) : 0;
-                                ?>
-                                <tr>
-                                    <td><?php echo $months[$data['month'] - 1]; ?></td>
-                                    <td><?php echo $data['count']; ?></td>
-                                    <td>
-                                        <div style="background: var(--bg-light); border-radius: 5px; height: 25px; display: flex; align-items: center; padding: 0 0.5rem;">
-                                            <div style="background: var(--accent-orange); height: 4px; width: <?php echo $percentage * 2; ?>%; border-radius: 2px;"></div>
-                                            <span style="margin-left: 0.5rem; font-size: 0.85rem; color: var(--text-light);"><?php echo $percentage; ?>%</span>
-                                        </div>
-                                    </td>
-                                </tr>
+                    <div style="display: grid; grid-template-columns: repeat(auto-fit, minmax(300px, 1fr)); gap: 1rem; margin-top: 1rem;">
+                        
+                        <!-- Peak Season Analysis -->
+                        <div class="chart-container" style="margin: 0;">
+                            <h3 style="font-size: 1rem; margin-bottom: 0.5rem;">Peak Season</h3>
+                            
+                            <?php
+                            $peakSeasonSql = "SELECT MONTH(check_in) as month, COUNT(*) as bookings, 
+                                             SUM(adults + children + seniors) as total_guests 
+                                             FROM reservations 
+                                             WHERE YEAR(check_in) = YEAR(NOW()) 
+                                             AND COALESCE(NULLIF(status, ''), 'pending') IN ('approved','completed')
+                                             GROUP BY MONTH(check_in) 
+                                             ORDER BY total_guests DESC 
+                                             LIMIT 3";
+                            $peakSeasonResult = $conn->query($peakSeasonSql);
+                            $peakSeasons = $peakSeasonResult ? $peakSeasonResult->fetch_all(MYSQLI_ASSOC) : [];
+                            $months = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
+                            ?>
+                            
+                            <?php if (!empty($peakSeasons)): ?>
+                            <div style="display: flex; gap: 0.5rem; margin-top: 0.5rem;">
+                                <?php foreach ($peakSeasons as $index => $season): ?>
+                                <div style="flex: 1; background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); color: white; padding: 0.75rem; border-radius: 8px; text-align: center;">
+                                    <div style="font-size: 0.75rem; opacity: 0.9;">
+                                        <?php echo $index === 0 ? '🏆' : ($index === 1 ? '🥈' : '🥉'); ?>
+                                    </div>
+                                    <div style="font-size: 1rem; font-weight: 700;">
+                                        <?php echo $months[$season['month'] - 1]; ?>
+                                    </div>
+                                    <div style="font-size: 0.75rem; opacity: 0.9;">
+                                        <?php echo $season['total_guests']; ?> guests
+                                    </div>
+                                </div>
                                 <?php endforeach; ?>
-                            </tbody>
-                        </table>
-                        <div style="margin-top:1.5rem;">
-                            <div id="monthlyBookingsChart" style="width:100%; max-width:900px; height:240px;"></div>
+                            </div>
+                            <?php else: ?>
+                            <p style="color: var(--text-light); font-size: 0.85rem;">No data available</p>
+                            <?php endif; ?>
+                        </div>
+
+                        <!-- Revenue Summary -->
+                        <div class="chart-container" style="margin: 0;">
+                            <h3 style="font-size: 1rem; margin-bottom: 0.5rem;">Revenue</h3>
+                            <p style="color: var(--text-light); font-size: 0.85rem;">Total: <strong style="color: var(--accent-orange); font-size: 1.25rem;">₱<?php echo number_format($stats['total_revenue']['total'] ?? 0, 2); ?></strong></p>
                         </div>
                     </div>
 
-                    <div class="chart-container">
-                        <h3>Revenue Summary</h3>
-                        <p style="color: var(--text-light);">Total revenue: <strong style="color: var(--accent-orange); font-size: 1.5rem;">₱<?php echo number_format($stats['total_revenue']['total'] ?? 0, 2); ?></strong></p>
+                    <!-- Charts Section -->
+                    <div style="display: grid; grid-template-columns: repeat(auto-fit, minmax(400px, 1fr)); gap: 1rem; margin-top: 1rem;">
+                        
+                        <!-- Monthly Guest Count Line Graph -->
+                        <div class="chart-container" style="margin: 0;">
+                            <h3 style="font-size: 1rem; margin-bottom: 0.5rem;">Monthly Guests</h3>
+                            
+                            <?php
+                            $monthlyGuestsSql = "SELECT MONTH(check_in) as month, SUM(adults + children + seniors) as total_guests 
+                                               FROM reservations 
+                                               WHERE YEAR(check_in) = YEAR(NOW()) 
+                                               AND COALESCE(NULLIF(status, ''), 'pending') IN ('approved','completed')
+                                               GROUP BY MONTH(check_in) 
+                                               ORDER BY month";
+                            $monthlyGuestsResult = $conn->query($monthlyGuestsSql);
+                            $monthlyGuestsData = $monthlyGuestsResult ? $monthlyGuestsResult->fetch_all(MYSQLI_ASSOC) : [];
+                            
+                            // Create array with all months (0 for months with no data)
+                            $guestsByMonth = array_fill(0, 12, 0);
+                            foreach ($monthlyGuestsData as $data) {
+                                $guestsByMonth[$data['month'] - 1] = $data['total_guests'];
+                            }
+                            ?>
+                            
+                            <div id="monthlyGuestsChart" style="width:100%; height:180px;"></div>
+                        </div>
+
+                        <!-- Monthly Bookings Chart -->
+                        <div class="chart-container" style="margin: 0;">
+                            <h3 style="font-size: 1rem; margin-bottom: 0.5rem;">Monthly Bookings</h3>
+                            <div id="monthlyBookingsChart" style="width:100%; height:180px;"></div>
+                        </div>
+                    </div>
+
+                    <!-- Compact Tables Section -->
+                    <div style="display: grid; grid-template-columns: repeat(auto-fit, minmax(350px, 1fr)); gap: 1rem; margin-top: 1rem;">
+                        
+                        <!-- Monthly Guest Statistics Table -->
+                        <div class="chart-container" style="margin: 0;">
+                            <h3 style="font-size: 1rem; margin-bottom: 0.5rem;">Guests by Month</h3>
+                            <table style="font-size: 0.85rem;">
+                                <thead>
+                                    <tr>
+                                        <th style="padding: 0.4rem;">Month</th>
+                                        <th style="padding: 0.4rem;">Guests</th>
+                                        <th style="padding: 0.4rem;">Avg/Booking</th>
+                                    </tr>
+                                </thead>
+                                <tbody>
+                                    <?php 
+                                    $totalGuests = 0;
+                                    $totalBookings = 0;
+                                    foreach ($months as $index => $monthName):
+                                        $guestCount = $guestsByMonth[$index];
+                                        $monthBookingSql = "SELECT COUNT(*) as count FROM reservations 
+                                                          WHERE MONTH(check_in) = " . ($index + 1) . " 
+                                                          AND YEAR(check_in) = YEAR(NOW()) 
+                                                          AND COALESCE(NULLIF(status, ''), 'pending') IN ('approved','completed')";
+                                        $monthBookingResult = $conn->query($monthBookingSql);
+                                        $monthBookingData = $monthBookingResult ? $monthBookingResult->fetch_assoc() : [];
+                                        $bookingCount = $monthBookingData['count'] ?? 0;
+                                        $avgPerBooking = $bookingCount > 0 ? round($guestCount / $bookingCount, 1) : 0;
+                                        $totalGuests += $guestCount;
+                                        $totalBookings += $bookingCount;
+                                    ?>
+                                    <tr>
+                                        <td style="padding: 0.4rem;"><?php echo $monthName; ?></td>
+                                        <td style="padding: 0.4rem;"><?php echo $guestCount; ?></td>
+                                        <td style="padding: 0.4rem;"><?php echo $avgPerBooking; ?></td>
+                                    </tr>
+                                    <?php endforeach; ?>
+                                    <tr style="background: #f3f4f6; font-weight: 700;">
+                                        <td style="padding: 0.4rem;">Total</td>
+                                        <td style="padding: 0.4rem;"><?php echo $totalGuests; ?></td>
+                                        <td style="padding: 0.4rem;"><?php echo $totalBookings > 0 ? round($totalGuests / $totalBookings, 1) : 0; ?></td>
+                                    </tr>
+                                </tbody>
+                            </table>
+                        </div>
+
+                        <!-- Monthly Bookings Table -->
+                        <div class="chart-container" style="margin: 0;">
+                            <h3 style="font-size: 1rem; margin-bottom: 0.5rem;">Bookings by Month</h3>
+                            <table style="font-size: 0.85rem;">
+                                <thead>
+                                    <tr>
+                                        <th style="padding: 0.4rem;">Month</th>
+                                        <th style="padding: 0.4rem;">Bookings</th>
+                                        <th style="padding: 0.4rem;">%</th>
+                                    </tr>
+                                </thead>
+                                <tbody>
+                                    <?php 
+                                    $monthlyData = $conn->query("SELECT MONTH(check_in) as month, COUNT(*) as count FROM reservations WHERE YEAR(check_in) = YEAR(NOW()) AND COALESCE(NULLIF(status, ''), 'pending') IN ('approved','completed') GROUP BY MONTH(check_in) ORDER BY month")->fetch_all(MYSQLI_ASSOC);
+                                    $totalMonthly = array_sum(array_column($monthlyData, 'count'));
+                                    
+                                    foreach ($monthlyData as $data):
+                                        $percentage = $totalMonthly > 0 ? round(($data['count'] / $totalMonthly) * 100, 1) : 0;
+                                    ?>
+                                    <tr>
+                                        <td style="padding: 0.4rem;"><?php echo $months[$data['month'] - 1]; ?></td>
+                                        <td style="padding: 0.4rem;"><?php echo $data['count']; ?></td>
+                                        <td style="padding: 0.4rem;"><?php echo $percentage; ?>%</td>
+                                    </tr>
+                                    <?php endforeach; ?>
+                                    <tr style="background: #f3f4f6; font-weight: 700;">
+                                        <td style="padding: 0.4rem;">Total</td>
+                                        <td style="padding: 0.4rem;"><?php echo $totalMonthly; ?></td>
+                                        <td style="padding: 0.4rem;">100%</td>
+                                    </tr>
+                                </tbody>
+                            </table>
+                        </div>
                     </div>
                     <script>
                     (function(){
@@ -1302,12 +1527,12 @@ $reviews = $reviewsResult->fetch_all(MYSQLI_ASSOC);
                             } catch (e) { console.error(e); return null; }
                         }
 
-                        function renderLineChart(containerId, values){
+                        function renderLineChart(containerId, values, color = '#ff7a3d'){
                             const container = document.getElementById(containerId);
                             if (!container) return;
-                            const w = container.clientWidth || 900;
-                            const h = container.clientHeight || 240;
-                            const pad = 36;
+                            const w = container.clientWidth || 400;
+                            const h = container.clientHeight || 180;
+                            const pad = 25;
                             const max = Math.max(...values, 1);
                             const stepX = (w - pad*2) / (values.length - 1);
 
@@ -1322,26 +1547,31 @@ $reviews = $reviewsResult->fetch_all(MYSQLI_ASSOC);
                             // axes
                             svg += '<line x1="'+pad+'" y1="'+pad+'" x2="'+pad+'" y2="'+(h-pad)+'" stroke="#e6e7eb" stroke-width="1"/>';
                             svg += '<line x1="'+pad+'" y1="'+(h-pad)+'" x2="'+(w-pad)+'" y2="'+(h-pad)+'" stroke="#e6e7eb" stroke-width="1"/>';
-                            // grid + y labels
+                            // grid
                             for (let i=0;i<=4;i++){
                                 const gy = pad + i * ((h - pad*2)/4);
                                 svg += '<line x1="'+pad+'" y1="'+gy+'" x2="'+(w-pad)+'" y2="'+gy+'" stroke="#f3f4f6" stroke-width="1"/>';
                             }
                             // line
-                            svg += '<path d="'+path+'" fill="none" stroke="#ff7a3d" stroke-width="3" stroke-linecap="round" stroke-linejoin="round" />';
+                            svg += '<path d="'+path+'" fill="none" stroke="'+color+'" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" />';
                             // points and labels
                             const monthsShort = ["Jan","Feb","Mar","Apr","May","Jun","Jul","Aug","Sep","Oct","Nov","Dec"];
                             values.forEach((v,i)=>{
                                 const x = pad + i * stepX;
                                 const y = h - pad - (v / max) * (h - pad*2);
-                                svg += '<circle cx="'+x+'" cy="'+y+'" r="4" fill="#ff7a3d" />';
-                                svg += '<text x="'+x+'" y="'+(h - pad + 16)+'" font-size="11" text-anchor="middle" fill="#374151">'+monthsShort[i]+'</text>';
+                                svg += '<circle cx="'+x+'" cy="'+y+'" r="3" fill="'+color+'" />';
+                                svg += '<text x="'+x+'" y="'+(h - pad + 12)+'" font-size="9" text-anchor="middle" fill="#374151">'+monthsShort[i]+'</text>';
                             });
                             svg += '</svg>';
                             container.innerHTML = svg;
                         }
 
                         document.addEventListener('DOMContentLoaded', async function(){
+                            // Render monthly guests chart
+                            const monthlyGuestsData = <?php echo json_encode($guestsByMonth); ?>;
+                            renderLineChart('monthlyGuestsChart', monthlyGuestsData, '#667eea');
+
+                            // Render monthly bookings chart
                             const months = await fetchMonthly();
                             if (!months) return;
                             const values = [];
@@ -1449,14 +1679,113 @@ $reviews = $reviewsResult->fetch_all(MYSQLI_ASSOC);
 
                     <div style="display:flex; justify-content:space-between; align-items:center; gap:1rem; margin-bottom: 1.5rem; flex-wrap:wrap;">
                         <button class="btn-primary" onclick="openAddCottageModal()"><i class="fas fa-plus"></i> Add New Cottage</button>
+                        
+                        <?php
+                        $selectedDateCottages = $_GET['date'] ?? null;
+                        
+                        if ($selectedDateCottages): ?>
+                        <div style="background: #e0f2fe; padding: 0.5rem 1rem; border-radius: 6px; border-left: 4px solid var(--primary-blue);">
+                            <strong>Selected Date:</strong> <?php echo date('F d, Y', strtotime($selectedDateCottages)); ?>
+                            <a href="dashboard.php?section=cottages" style="background: none; border: none; color: var(--primary-blue); cursor: pointer; margin-left: 0.5rem; text-decoration: underline; font-size: 0.85rem;">Clear</a>
+                        </div>
+                        <?php endif; ?>
+                        
+                        <button class="btn-primary" onclick="openDateModal()" style="background: var(--primary-blue);"><i class="fas fa-calendar"></i> Check Availability</button>
                         <?php if (!empty($editingCottage)): ?>
                             <a href="dashboard.php?section=cottages" class="btn-small btn-delete" style="text-decoration:none;">Cancel Edit</a>
                         <?php endif; ?>
                     </div>
 
+                    <?php
+                    // Calculate remaining slots for each cottage on selected date
+                    $cottageAvailability = [];
+                    if ($selectedDateCottages) {
+                        foreach ($cottages as $cottage) {
+                            $cottageName = $cottage['name'];
+                            $limit = $cottage['daily_slots'] ?? 1;
+                            
+                            // Count existing reservations for this cottage on selected date
+                            $countSql = "SELECT COUNT(*) as count 
+                                        FROM reservation_items ri 
+                                        JOIN reservations r ON ri.reservation_id = r.id 
+                                        WHERE ri.item_name = ? AND ri.item_type = 'cottage' 
+                                        AND r.check_in = ? AND r.status != 'cancelled'";
+                            $countStmt = $conn->prepare($countSql);
+                            $countStmt->bind_param("ss", $cottageName, $selectedDateCottages);
+                            $countStmt->execute();
+                            $countResult = $countStmt->get_result();
+                            $bookedCount = $countResult->fetch_assoc()['count'] ?? 0;
+                            
+                            $remainingSlots = max(0, $limit - $bookedCount);
+                            $cottageAvailability[$cottage['id']] = [
+                                'limit' => $limit,
+                                'booked' => $bookedCount,
+                                'remaining' => $remainingSlots
+                            ];
+                        }
+                    } else {
+                        // Set default availability when no date is selected
+                        foreach ($cottages as $cottage) {
+                            $limit = $cottage['daily_slots'] ?? 1;
+                            $cottageAvailability[$cottage['id']] = [
+                                'limit' => $limit,
+                                'booked' => 0,
+                                'remaining' => $limit
+                            ];
+                        }
+                    }
+                    ?>
+
                     <?php if (!empty($cottageErrorMessage)): ?>
                         <div style="background:#fee2e2; color:#991b1b; padding:0.75rem 1rem; border-radius:6px; margin-bottom:1rem;"><?php echo htmlspecialchars($cottageErrorMessage); ?></div>
                     <?php endif; ?>
+
+                    <div class="cottages-container">
+                    <?php foreach ($cottages as $cottage): ?>
+                    <?php $availability = $cottageAvailability[$cottage['id']]; ?>
+                    <div class="cottage-card" style="background: #f3f4f6; border-radius: 12px; padding: 1.5rem; text-align: center;">
+                        <h3 style="color: var(--primary-blue); margin: 0 0 1rem 0; font-size: 1.2rem;"><?php echo htmlspecialchars($cottage['name'] ?? ''); ?></h3>
+                        
+                        <div style="height: 150px; background: #e5e7eb; border-radius: 8px; display: flex; align-items: center; justify-content: center; margin-bottom: 1rem; overflow: hidden;">
+                            <?php 
+                            $imageUrl = $cottage['image_url'] ?? '';
+                            if (!empty($imageUrl)): 
+                                if (preg_match('/^https?:\/\//i', $imageUrl)) {
+                                    $displayImage = $imageUrl;
+                                } elseif (strpos($imageUrl, '/') === 0) {
+                                    $displayImage = rtrim(SITE_URL, '/') . $imageUrl;
+                                } else {
+                                    $displayImage = SITE_URL . $imageUrl;
+                                }
+                            ?>
+                                <img src="<?php echo htmlspecialchars($displayImage); ?>" alt="<?php echo htmlspecialchars($cottage['name']); ?>" style="width: 100%; height: 100%; object-fit: cover;">
+                            <?php else: ?>
+                                <span style="color: #9ca3af; font-size: 0.9rem;">Actual Image</span>
+                            <?php endif; ?>
+                        </div>
+                        
+                        <?php if ($selectedDateCottages): ?>
+                        <div style="background: white; padding: 1rem; border-radius: 8px; margin-bottom: 1rem;">
+                            <div style="color: #64748b; font-size: 0.9rem; margin-bottom: 0.5rem;">Remaining slots</div>
+                            <div style="font-size: 1.5rem; font-weight: 700; color: <?php echo $availability['remaining'] > 0 ? '#10b981' : '#ef4444'; ?>;">
+                                <?php echo $availability['remaining']; ?>
+                            </div>
+                        </div>
+                        <?php else: ?>
+                        <button class="btn-small" style="background: #374151; color: white; border: none; padding: 0.75rem 2rem; border-radius: 8px; cursor: pointer; font-weight: 600; margin-bottom: 1rem;" onclick="openEditCottageModal(<?php echo (int)$cottage['id']; ?>, '<?php echo str_replace("'", "\\'", htmlspecialchars($cottage['name'] ?? '', ENT_QUOTES)); ?>', <?php echo (int)($cottage['capacity'] ?? 0); ?>, <?php echo (float)($cottage['price_per_night'] ?? 0); ?>, <?php echo (int)($cottage['daily_slots'] ?? 1); ?>, '<?php echo str_replace("'", "\\'", htmlspecialchars($cottage['image_url'] ?? '', ENT_QUOTES)); ?>', '<?php echo str_replace("'", "\\'", htmlspecialchars($cottage['description'] ?? '', ENT_QUOTES)); ?>', <?php echo !empty($cottage['available']) ? 'true' : 'false'; ?>)">View</button>
+                        <?php endif; ?>
+                        
+                        <div style="display: flex; gap: 0.5rem; justify-content: center;">
+                            <button class="btn-small btn-edit" onclick="openEditCottageModal(<?php echo (int)$cottage['id']; ?>, '<?php echo str_replace("'", "\\'", htmlspecialchars($cottage['name'] ?? '', ENT_QUOTES)); ?>', <?php echo (int)($cottage['capacity'] ?? 0); ?>, <?php echo (float)($cottage['price_per_night'] ?? 0); ?>, <?php echo (int)($cottage['daily_slots'] ?? 1); ?>, '<?php echo str_replace("'", "\\'", htmlspecialchars($cottage['image_url'] ?? '', ENT_QUOTES)); ?>', '<?php echo str_replace("'", "\\'", htmlspecialchars($cottage['description'] ?? '', ENT_QUOTES)); ?>', <?php echo !empty($cottage['available']) ? 'true' : 'false'; ?>)">Edit</button>
+                            <form method="post" action="dashboard.php?section=cottages" style="display:inline-block;" onsubmit="return confirm('Delete this cottage?');">
+                                <input type="hidden" name="cottage_action" value="delete_cottage">
+                                <input type="hidden" name="cottage_id" value="<?php echo (int)$cottage['id']; ?>">
+                                <button type="submit" class="btn-small btn-delete">Delete</button>
+                            </form>
+                        </div>
+                    </div>
+                    <?php endforeach; ?>
+                    </div>
 
                     <!-- Add Cottage Modal -->
                     <div id="addCottageModal" style="display:none; position:fixed; top:0; left:0; right:0; bottom:0; background:rgba(0,0,0,0.5); z-index:2000; align-items:center; justify-content:center;">
@@ -1479,6 +1808,11 @@ $reviews = $reviewsResult->fetch_all(MYSQLI_ASSOC);
                                     <div>
                                         <label style="display:block; margin-bottom:0.35rem; font-weight:600;">Price per Night</label>
                                         <input type="number" step="0.01" name="cottage_price" min="0" value="0" required style="width:100%; padding:0.7rem; border:1px solid var(--border-gray); border-radius:6px;">
+                                    </div>
+                                    <div>
+                                        <label style="display:block; margin-bottom:0.35rem; font-weight:600;">Daily Slots</label>
+                                        <input type="number" name="cottage_slots" min="1" value="1" required style="width:100%; padding:0.7rem; border:1px solid var(--border-gray); border-radius:6px;">
+                                        <small style="color: var(--text-light); font-size: 0.8rem;">Maximum bookings per day</small>
                                     </div>
                                     <div>
                                         <label style="display:block; margin-bottom:0.35rem; font-weight:600;">Upload Image</label>
@@ -1527,6 +1861,11 @@ $reviews = $reviewsResult->fetch_all(MYSQLI_ASSOC);
                                         <input type="number" step="0.01" name="cottage_price" id="editCottagePrice" min="0" value="0" required style="width:100%; padding:0.7rem; border:1px solid var(--border-gray); border-radius:6px;">
                                     </div>
                                     <div>
+                                        <label style="display:block; margin-bottom:0.35rem; font-weight:600;">Daily Slots</label>
+                                        <input type="number" name="cottage_slots" id="editCottageSlots" min="1" value="1" required style="width:100%; padding:0.7rem; border:1px solid var(--border-gray); border-radius:6px;">
+                                        <small style="color: var(--text-light); font-size: 0.8rem;">Maximum bookings per day</small>
+                                    </div>
+                                    <div>
                                         <label style="display:block; margin-bottom:0.35rem; font-weight:600;">Upload New Image (optional)</label>
                                         <input type="file" name="cottage_image" id="editCottageImage" accept="image/*" style="width:100%; padding:0.7rem; border:1px solid var(--border-gray); border-radius:6px;">
                                     </div>
@@ -1548,25 +1887,6 @@ $reviews = $reviewsResult->fetch_all(MYSQLI_ASSOC);
                             </form>
                         </div>
                     </div>
-
-                    <?php foreach ($cottages as $cottage): ?>
-                    <div class="cottage-card">
-                        <div class="cottage-card-header">
-                            <h3><?php echo htmlspecialchars($cottage['name'] ?? ''); ?></h3>
-                            <span class="price-badge">₱<?php echo number_format((float)($cottage['price_per_night'] ?? 0), 2); ?>/night</span>
-                        </div>
-                        <p style="color: var(--text-light); margin: 0.5rem 0;"><?php echo htmlspecialchars($cottage['description'] ?? ''); ?></p>
-                        <p style="color: var(--text-light); margin: 0.25rem 0 0.75rem; font-size: 0.95rem;">Capacity: <?php echo (int)($cottage['capacity'] ?? 0); ?> • <?php echo !empty($cottage['available']) ? 'Available' : 'Unavailable'; ?></p>
-                        <div style="margin-top: 1rem;">
-                            <button class="btn-small btn-edit" onclick="openEditCottageModal(<?php echo (int)$cottage['id']; ?>, '<?php echo str_replace("'", "\\'", htmlspecialchars($cottage['name'] ?? '', ENT_QUOTES)); ?>', <?php echo (int)($cottage['capacity'] ?? 0); ?>, <?php echo (float)($cottage['price_per_night'] ?? 0); ?>, '<?php echo str_replace("'", "\\'", htmlspecialchars($cottage['image_url'] ?? '', ENT_QUOTES)); ?>', '<?php echo str_replace("'", "\\'", htmlspecialchars($cottage['description'] ?? '', ENT_QUOTES)); ?>', <?php echo !empty($cottage['available']) ? 'true' : 'false'; ?>)">Edit</button>
-                            <form method="post" action="dashboard.php?section=cottages" style="display:inline-block; margin-left:0.5rem;" onsubmit="return confirm('Delete this cottage?');">
-                                <input type="hidden" name="cottage_action" value="delete_cottage">
-                                <input type="hidden" name="cottage_id" value="<?php echo (int)$cottage['id']; ?>">
-                                <button type="submit" class="btn-small btn-delete">Delete</button>
-                            </form>
-                        </div>
-                    </div>
-                    <?php endforeach; ?>
                 </div>
 
                 <!-- Manage Pools Section -->
@@ -2593,11 +2913,12 @@ $reviews = $reviewsResult->fetch_all(MYSQLI_ASSOC);
         }
 
         // Modal functions for Edit Room, Cottage, and Pool
-        function openEditRoomModal(id, name, capacity, price, imageUrl, description, available) {
+        function openEditRoomModal(id, name, capacity, price, slots, imageUrl, description, available) {
             document.getElementById('editRoomId').value = id;
             document.getElementById('editRoomName').value = name;
             document.getElementById('editRoomCapacity').value = capacity;
             document.getElementById('editRoomPrice').value = price;
+            document.getElementById('editRoomSlots').value = slots;
             document.getElementById('editRoomImage').value = '';
             document.getElementById('editRoomDescription').value = description;
             document.getElementById('editRoomAvailable').checked = available;
@@ -2613,11 +2934,12 @@ $reviews = $reviewsResult->fetch_all(MYSQLI_ASSOC);
             document.body.style.overflow = 'auto';
         }
 
-        function openEditCottageModal(id, name, capacity, price, imageUrl, description, available) {
+        function openEditCottageModal(id, name, capacity, price, slots, imageUrl, description, available) {
             document.getElementById('editCottageId').value = id;
             document.getElementById('editCottageName').value = name;
             document.getElementById('editCottageCapacity').value = capacity;
             document.getElementById('editCottagePrice').value = price;
+            document.getElementById('editCottageSlots').value = slots;
             document.getElementById('editCottageImage').value = '';
             document.getElementById('editCottageDescription').value = description;
             document.getElementById('editCottageAvailable').checked = available;
@@ -2740,6 +3062,58 @@ $reviews = $reviewsResult->fetch_all(MYSQLI_ASSOC);
             refreshBookingCount();
             setInterval(refreshBookingCount, 15000);
         });
+
+        // Date picker modal functions
+        window.openDateModal = function() {
+            document.getElementById('dateModal').style.display = 'flex';
+            // Set minimum date to today
+            const today = new Date().toISOString().split('T')[0];
+            document.getElementById('dateInput').min = today;
+            document.getElementById('dateInput').value = today;
+        }
+
+        window.closeDateModal = function() {
+            document.getElementById('dateModal').style.display = 'none';
+        }
+
+        window.applyDate = function() {
+            const selectedDate = document.getElementById('dateInput').value;
+            if (selectedDate) {
+                const currentSection = document.querySelector('.admin-section.active')?.id || 'rooms';
+                window.location.href = `dashboard.php?section=${currentSection}&date=${selectedDate}`;
+            }
+        }
+
+        window.clearDate = function() {
+            const currentSection = document.querySelector('.admin-section.active')?.id || 'rooms';
+            window.location.href = `dashboard.php?section=${currentSection}`;
+        }
+
+        // Close modal when clicking outside
+        window.addEventListener('click', function(event) {
+            const modal = document.getElementById('dateModal');
+            if (event.target === modal) {
+                window.closeDateModal();
+            }
+        });
     </script>
+
+    <!-- Date Picker Modal -->
+    <div id="dateModal" style="display: none; position: fixed; top: 0; left: 0; right: 0; bottom: 0; background: rgba(0,0,0,0.5); z-index: 2000; align-items: center; justify-content: center;">
+        <div style="background: white; padding: 2rem; border-radius: 12px; max-width: 400px; width: 90%; box-shadow: 0 10px 40px rgba(0,0,0,0.3);">
+            <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 1.5rem;">
+                <h2 style="color: var(--primary-blue); margin: 0;">Select Date</h2>
+                <button onclick="closeDateModal()" style="background: none; border: none; font-size: 1.5rem; cursor: pointer; color: var(--text-light);">&times;</button>
+            </div>
+            <div style="margin-bottom: 1.5rem;">
+                <label style="display: block; margin-bottom: 0.5rem; color: var(--text-dark); font-weight: 600;">Choose a date to check availability:</label>
+                <input type="date" id="dateInput" style="width: 100%; padding: 0.75rem; border: 1px solid #e5e7eb; border-radius: 6px; font-size: 1rem;">
+            </div>
+            <div style="display: flex; gap: 1rem;">
+                <button onclick="closeDateModal()" style="flex: 1; padding: 0.75rem; background: #e5e7eb; color: var(--text-dark); border: none; border-radius: 6px; font-weight: 600; cursor: pointer;">Cancel</button>
+                <button onclick="applyDate()" style="flex: 1; padding: 0.75rem; background: var(--primary-blue); color: white; border: none; border-radius: 6px; font-weight: 600; cursor: pointer;">Check Availability</button>
+            </div>
+        </div>
+    </div>
 </body>
 </html>
