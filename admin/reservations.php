@@ -3,8 +3,6 @@ require_once '../config/config.php';
 if (session_status() === PHP_SESSION_NONE) {
     session_start();
 }
-require_once '../config/database.php';
-require_once '../includes/EmailService.php';
 
 // Check if admin is logged in
 if (!isset($_SESSION['admin_logged_in']) || $_SESSION['admin_logged_in'] !== true) {
@@ -12,12 +10,9 @@ if (!isset($_SESSION['admin_logged_in']) || $_SESSION['admin_logged_in'] !== tru
     exit();
 }
 
-require_once '../includes/header.php';
-
-// Prevent caching
-header("Cache-Control: no-cache, no-store, must-revalidate");
-header("Pragma: no-cache");
-header("Expires: 0");
+// Redirect to the unified dashboard reservations section
+header("Location: dashboard.php?section=reservations");
+exit();
 
 // Handle reservation approval/rejection
 if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['action'])) {
@@ -41,14 +36,14 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['action'])) {
                 sendApprovalEmail($reservationDetails);
             }
             error_log("Reservation $reservationId approved by admin");
-            header("Location: reservations.php?success=approved");
+            header("Location: dashboard.php?section=reservations&success=approved");
             exit();
         } elseif ($action === 'reject') {
             if (!empty($reservationDetails['email'])) {
                 sendCancellationEmail($reservationDetails);
             }
             error_log("Reservation $reservationId rejected by admin");
-            header("Location: reservations.php?success=rejected");
+            header("Location: dashboard.php?section=reservations&success=rejected");
             exit();
         }
     }
@@ -56,12 +51,11 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['action'])) {
 
 function getReservationNotificationData($conn, $reservationId) {
     $query = "SELECT r.id, r.user_id, r.check_in, r.check_out, r.total_amount, r.status,
-                     COALESCE(u.email, ua.email) AS email,
-                     COALESCE(u.fullname, ua.fullname, 'Guest') AS fullname,
+                     COALESCE(u.email, '') AS email,
+                     COALESCE(u.fullname, 'Guest') AS fullname,
                      GROUP_CONCAT(CONCAT(ri.item_name, ' (', ri.item_type, ')') SEPARATOR ', ') AS items
               FROM reservations r
               LEFT JOIN users u ON r.user_id = u.id
-              LEFT JOIN user_accounts ua ON r.user_id = ua.id
               LEFT JOIN reservation_items ri ON r.id = ri.reservation_id
               WHERE r.id = ?
               GROUP BY r.id";
@@ -241,15 +235,14 @@ function sendCancellationEmail($reservation) {
 $db = new Database();
 $conn = $db->getConnection();
 
-// Simple direct query - no COALESCE tricks
+// Simple direct query - user_accounts table was removed during migration
 $reservations = $conn->query("
     SELECT r.id, r.check_in, r.check_out, r.adults, r.children, r.seniors, r.total_amount, r.status, r.tour_type, r.created_at,
-           COALESCE(u.fullname, ua.fullname, 'Guest') as user_name,
-           COALESCE(u.email, ua.email, '') as user_email,
-           COALESCE(u.phone, ua.phone, '') as user_phone
-    FROM reservations r 
+           COALESCE(u.fullname, 'Guest') as user_name,
+           COALESCE(u.email, '') as user_email,
+           COALESCE(u.phone, '') as user_phone
+    FROM reservations r
     LEFT JOIN users u ON r.user_id = u.id
-    LEFT JOIN user_accounts ua ON r.user_id = ua.id
     WHERE COALESCE(NULLIF(r.status, ''), 'pending') = 'pending'
     ORDER BY r.created_at DESC
 ")->fetch_all(MYSQLI_ASSOC);
@@ -739,9 +732,9 @@ foreach ($reservations as &$reservation) {
                             <th>Reservation ID</th>
                             <th>Customer</th>
                             <th>Details</th>
-                            <th>Guests</th>
                             <th>Tour Hours</th>
                             <th>Amount</th>
+                            <th>Guests</th>
                             <th>Status</th>
                             <th>Actions</th>
                         </tr>
@@ -762,7 +755,7 @@ foreach ($reservations as &$reservation) {
                                     <td>
                                         <div class="reservation-details">
                                             <p><strong>Check-in:</strong> <?php echo date('M d, Y', strtotime($reservation['check_in'])); ?></p>
-                                            <p><strong>Check-out:</strong> <?php 
+                                            <p><strong>Check-out:</strong> <?php
                                                 if ($reservation['tour_type'] === 'day') {
                                                     echo date('M d, Y', strtotime($reservation['check_in']));
                                                 } else {
@@ -771,14 +764,6 @@ foreach ($reservations as &$reservation) {
                                             ?></p>
                                             <p><strong>Tour:</strong> <?php echo ucfirst($reservation['tour_type']); ?></p>
                                             <p><strong>Items:</strong> <?php echo count($reservation['items']); ?></p>
-                                        </div>
-                                    </td>
-                                    <td>
-                                        <div class="reservation-details">
-                                            <p><strong>Adults:</strong> <?php echo $reservation['adults']; ?></p>
-                                            <p><strong>Children:</strong> <?php echo $reservation['children']; ?></p>
-                                            <p><strong>Seniors:</strong> <?php echo $reservation['seniors']; ?></p>
-                                            <p><strong>Total:</strong> <?php echo $reservation['adults'] + $reservation['children'] + $reservation['seniors']; ?></p>
                                         </div>
                                     </td>
                                     <td>
@@ -793,6 +778,13 @@ foreach ($reservations as &$reservation) {
                                         </div>
                                     </td>
                                     <td><strong>₱<?php echo number_format($reservation['total_amount'], 2); ?></strong></td>
+                                    <td>
+                                        <div class="reservation-details">
+                                            <p><strong>Adults:</strong> <?php echo $reservation['adults']; ?></p>
+                                            <p><strong>Children:</strong> <?php echo $reservation['children']; ?></p>
+                                            <p><strong>Total:</strong> <?php echo $reservation['adults'] + $reservation['children']; ?></p>
+                                        </div>
+                                    </td>
                                     <td>
                                         <span class="status-badge status-<?php echo strtolower(htmlspecialchars($reservationStatus)); ?>">
                                             <?php echo ucfirst(htmlspecialchars($reservationStatus)); ?>
@@ -825,7 +817,7 @@ foreach ($reservations as &$reservation) {
                             <?php endforeach; ?>
                         <?php else: ?>
                             <tr>
-                                <td colspan="7" style="text-align: center; padding: 2rem; color: var(--text-light);">
+                                <td colspan="8" style="text-align: center; padding: 2rem; color: var(--text-light);">
                                     <i class="fas fa-calendar-xmark" style="font-size: 2rem; margin-bottom: 1rem; display: block;"></i>
                                     <p>No reservations found</p>
                                 </td>

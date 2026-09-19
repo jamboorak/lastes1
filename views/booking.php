@@ -5,6 +5,7 @@ if (session_status() === PHP_SESSION_NONE) {
 }
 require_once __DIR__ . '/../config/database.php';
 require_once __DIR__ . '/../config/RoomConfig.php';
+require_once __DIR__ . '/../includes/guest_info_schema.php';
 
 function resolveImageUrl($imageUrl, $default = '') {
     if (empty($imageUrl)) {
@@ -20,6 +21,33 @@ function resolveImageUrl($imageUrl, $default = '') {
     return SITE_URL . $imageUrl;
 }
 
+function getBookingAlbumImages($name, $primaryImage, $type, $propertyId = 0) {
+    $images = array_filter([$primaryImage]);
+    global $conn;
+    if ($propertyId > 0 && isset($conn)) {
+        $galleryStmt = $conn->prepare('SELECT image_path FROM property_gallery_images WHERE property_type = ? AND property_id = ? ORDER BY sort_order, id');
+        if ($galleryStmt) {
+            $galleryType = $type === 'cottage' ? 'cottage' : 'room';
+            $galleryStmt->bind_param('si', $galleryType, $propertyId);
+            $galleryStmt->execute();
+            $galleryResult = $galleryStmt->get_result();
+            while ($galleryRow = $galleryResult->fetch_assoc()) {
+                $images[] = $galleryRow['image_path'];
+            }
+            $galleryStmt->close();
+        }
+    }
+
+    $uniqueImages = [];
+    foreach ($images as $image) {
+        $resolved = resolveImageUrl($image);
+        if ($resolved !== '' && !in_array($resolved, $uniqueImages, true)) {
+            $uniqueImages[] = $resolved;
+        }
+    }
+    return array_values($uniqueImages);
+}
+
 // Determine if user is logged in (require actual login)
 $isLoggedIn = isset($_SESSION['user_id']) && $_SESSION['user_id'] > 0;
 $userId = $_SESSION['user_id'] ?? 0;
@@ -30,12 +58,24 @@ if (!$isLoggedIn) {
     exit;
 }
 
+$hasGuestInfo = !empty($_SESSION['guest_info_id']);
+
 $roomId = $_GET['id'] ?? null;
 $type = $_GET['type'] ?? 'room'; // room, cottage
 
 // Get database connection
 $db = new Database();
 $conn = $db->getConnection();
+ensureGuestInfoSchema($conn);
+$conn->query("CREATE TABLE IF NOT EXISTS property_gallery_images (
+    id INT(11) AUTO_INCREMENT PRIMARY KEY,
+    property_type ENUM('room', 'cottage') NOT NULL,
+    property_id INT(11) NOT NULL,
+    image_path VARCHAR(255) NOT NULL,
+    sort_order INT(11) NOT NULL DEFAULT 0,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    INDEX idx_property_gallery (property_type, property_id)
+)");
 
 // Seed default rooms and cottages if tables are empty
 $roomCount = 0;
@@ -54,6 +94,8 @@ if ($roomCount === 0) {
     foreach ($defaultRooms as $roomData) {
         $conn->query("INSERT INTO rooms (name, description, capacity, price_per_night, image_url, available) VALUES ('" . $conn->real_escape_string($roomData['name']) . "', '" . $conn->real_escape_string($roomData['description']) . "', " . (int)$roomData['capacity'] . ", " . (float)$roomData['price'] . ", '" . $conn->real_escape_string($roomData['image']) . "', " . (int)$roomData['available'] . ")");
     }
+} else {
+    syncRoomBrochureData($conn);
 }
 
 // Only refresh cottages if they don't exist
@@ -84,7 +126,7 @@ if ($roomId) {
 // Fetch all available rooms and cottages for booking tabs
 $rooms = [];
 $cottages = [];
-$roomsSql = "SELECT * FROM rooms WHERE available = 1 ORDER BY id";
+$roomsSql = "SELECT * FROM rooms WHERE available = 1 AND archived = 0 ORDER BY id";
 if ($roomsResult = $conn->query($roomsSql)) {
     $rooms = $roomsResult->fetch_all(MYSQLI_ASSOC);
     $uniqueRooms = [];
@@ -96,7 +138,7 @@ if ($roomsResult = $conn->query($roomsSql)) {
     $rooms = array_values($uniqueRooms);
 }
 
-$cottagesSql = "SELECT * FROM cottages WHERE available = 1 ORDER BY id";
+$cottagesSql = "SELECT * FROM cottages WHERE available = 1 AND archived = 0 ORDER BY id";
 if ($cottagesResult = $conn->query($cottagesSql)) {
     $cottages = $cottagesResult->fetch_all(MYSQLI_ASSOC);
     $uniqueCottages = [];
@@ -108,83 +150,34 @@ if ($cottagesResult = $conn->query($cottagesSql)) {
     $cottages = array_values($uniqueCottages);
 }
 
-// Room details by image file name for the booking page
-$roomDetailsMap = [
-    'standard.jpg' => [
-        'summary' => 'Good for 2 pax • Resort access for 2 • Aircon Room',
-        'extras' => 'Free breakfast for 2 • Full sized bed • Shower w/heater'
-    ],
-    'deluxe.jpg' => [
-        'summary' => 'Good for 2 pax (max 4) • Resort access for 2 • Aircon Room',
-        'extras' => 'Free breakfast for 2 • 2 Full sized beds • Shower w/heater'
-    ],
-    'family-room.svg' => [
-        'summary' => 'Good for 4 pax (max 6) • Resort access for 4 • Aircon Room',
-        'extras' => 'Free breakfast for 4 • 1 Full sized bed • 1 Double deck • Shower w/heater'
-    ],
-    'family-deluxe-room.svg' => [
-        'summary' => 'Good for 6 pax (max 8) • Resort access for 6 • Aircon Room',
-        'extras' => 'Free breakfast for 6 • 4 Full sized beds • 2 Toilet & Bath • Shower w/heater'
-    ]
-];
+// Room brochure details by room name (single source: RoomConfig)
+$roomDetailsMap = [];
+foreach (DEFAULT_ROOMS as $configuredRoom) {
+    $roomDetailsMap[$configuredRoom['name']] = [
+        'promo' => $configuredRoom['promo'] ?? '',
+        'summary' => ($configuredRoom['promo'] ?? '') . (!empty($configuredRoom['promo']) ? ' • ' : '') . ($configuredRoom['inclusions'][0] ?? ''),
+        'extras' => implode(' • ', array_slice($configuredRoom['inclusions'] ?? [], 1)),
+        'inclusions' => $configuredRoom['inclusions'] ?? [],
+        'inclusions_text' => implode("\n", $configuredRoom['inclusions'] ?? [])
+    ];
+}
 
 // Initialize booking controller for availability checks
 require_once __DIR__ . '/../controllers/BookingController.php';
 $bookingController = new BookingController();
 
 // Get selected date from session or request
-$selectedDate = $_SESSION['selected_date'] ?? $_GET['date'] ?? '';
-$availabilityData = [];
+$selectedDate = $_GET['date'] ?? $_SESSION['selected_date'] ?? '';
+$initialTourType = strtolower((string)($_GET['tour'] ?? 'day')) === 'night' ? 'night' : 'day';
+$availabilityData = ['day' => [], 'night' => []];
 
 if (!empty($selectedDate)) {
-    $availabilityData = $bookingController->checkDailyAvailability($selectedDate);
+    $availabilityData['day'] = $bookingController->checkDailyAvailability($selectedDate, 'day');
+    $availabilityData['night'] = $bookingController->checkDailyAvailability($selectedDate, 'night');
 }
 
-// Handle booking submission
-$bookingMessage = '';
-if ($_SERVER['REQUEST_METHOD'] === 'POST') {
-    if (!$isLoggedIn) {
-        $bookingMessage = '<div style="background-color: #fee2e2; color: #7f1d1d; padding: 1rem; border-radius: 5px; margin-bottom: 1rem;"><i class="fas fa-exclamation-circle"></i> Please log in to make a booking.</div>';
-    } else {
-        $checkIn = $_POST['check_in'] ?? '';
-        $checkOut = $_POST['check_out'] ?? '';
-        $guests = $_POST['guests'] ?? '';
-        $name = $_POST['name'] ?? '';
-        $email = $_POST['email'] ?? '';
-        $phone = $_POST['phone'] ?? '';
-        $notes = $_POST['notes'] ?? '';
-        $roomType = $_POST['room_type'] ?? '';
+$initialAvailabilityData = $availabilityData[$initialTourType];
 
-        if (!empty($checkIn) && !empty($checkOut) && !empty($guests) && !empty($name)) {
-            // Check room availability before booking
-            if (!empty($roomType)) {
-                $isAvailable = $bookingController->isRoomAvailable($roomType, $checkIn);
-                if (!$isAvailable) {
-                    $bookingMessage = '<div style="background-color: #fee2e2; color: #7f1d1d; padding: 1rem; border-radius: 5px; margin-bottom: 1rem;"><i class="fas fa-exclamation-circle"></i> This room is not available on the selected date. Please choose a different room or date.</div>';
-                } else {
-                    $checkInDate = new DateTime($checkIn);
-                    $checkOutDate = new DateTime($checkOut);
-                    $interval = $checkInDate->diff($checkOutDate);
-                    $days = $interval->days ?: 1;
-                    $totalPrice = ($room['price_per_night'] ?? 0) * $days;
-
-                    $bookingSql = "INSERT INTO bookings (user_id, room_id, check_in, check_out, guests, total_price, notes, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, NOW())";
-                    $bookingStmt = $conn->prepare($bookingSql);
-                    $bookingStmt->bind_param("iissiis", $userId, $roomId, $checkIn, $checkOut, $guests, $totalPrice, $notes);
-
-                    if ($bookingStmt->execute()) {
-                        $bookingMessage = '<div style="background-color: #d1fae5; color: #065f46; padding: 1rem; border-radius: 5px; margin-bottom: 1rem;"><i class="fas fa-check-circle"></i> Booking confirmed! Booking ID: ' . $bookingStmt->insert_id . '</div>';
-                        $_POST = [];
-                    } else {
-                        $bookingMessage = '<div style="background-color: #fee2e2; color: #7f1d1d; padding: 1rem; border-radius: 5px; margin-bottom: 1rem;"><i class="fas fa-exclamation-circle"></i> Error creating booking. Please try again.</div>';
-                    }
-                }
-            }
-        }
-    }
-}
-?>
-<?php
 $pageTitle = 'Book Your Stay';
 $pageHead = <<<PAGE_HEAD
 <style>
@@ -209,6 +202,191 @@ $pageHead = <<<PAGE_HEAD
             padding: 0 !important;
             top: 0 !important;
             left: 0 !important;
+        }
+
+        /* 3D carousel — room cards (taller for inclusions) */
+        .slider-stage {
+            width: 100%;
+            max-width: 760px;
+            height: 600px !important;
+            position: relative;
+            transform-style: preserve-3d;
+            transition: transform 0.8s ease;
+        }
+
+        .room-card {
+            width: 360px !important;
+            height: 570px !important;
+        }
+
+        /* Cottage cards — compact size for shorter content */
+        .cottage-slider-stage {
+            width: 100%;
+            max-width: 760px;
+            height: 460px !important;
+            position: relative;
+            transform-style: preserve-3d;
+            transition: transform 0.8s ease;
+        }
+
+        .cottage-card {
+            width: 340px !important;
+            height: 430px !important;
+        }
+
+        .room-card .carousel-card-inner,
+        .cottage-card .carousel-card-inner {
+            width: 100%;
+            height: 100%;
+            border-radius: 28px;
+            overflow: hidden;
+            box-shadow: 0 28px 60px rgba(15, 23, 42, 0.14);
+            background: #fff;
+            display: flex;
+            flex-direction: column;
+        }
+
+        .room-card .carousel-card-image {
+            width: 100%;
+            height: 160px;
+            object-fit: cover;
+            display: block;
+            flex-shrink: 0;
+        }
+
+        .cottage-card .carousel-card-image {
+            width: 100%;
+            height: 190px;
+            object-fit: cover;
+            display: block;
+            flex-shrink: 0;
+        }
+
+        .room-card .carousel-card-body,
+        .cottage-card .carousel-card-body {
+            padding: 1.15rem 1.25rem 1.35rem;
+            flex: 1;
+            display: flex;
+            flex-direction: column;
+            min-height: 0;
+        }
+
+        .cottage-card .carousel-card-body {
+            padding: 1rem 1.15rem 1.2rem;
+        }
+
+        .room-card .carousel-card-body h3 {
+            color: #1e3a8a;
+            font-size: 1.45rem;
+            margin: 0 0 0.5rem 0;
+            line-height: 1.25;
+        }
+
+        .cottage-card .carousel-card-body h3 {
+            color: #1e3a8a;
+            font-size: 1.35rem;
+            margin: 0 0 0.4rem 0;
+            line-height: 1.25;
+        }
+
+        .room-card .carousel-card-meta,
+        .cottage-card .carousel-card-meta {
+            color: #475569;
+            line-height: 1.5;
+            margin: 0 0 0.5rem 0;
+            font-size: 0.95rem;
+        }
+
+        .room-card .carousel-card-desc {
+            color: #334155;
+            line-height: 1.45;
+            margin: 0 0 0.35rem 0;
+            font-size: 0.95rem;
+            overflow: visible;
+            flex: 0 0 auto;
+            min-height: 0;
+        }
+
+        .cottage-card .carousel-card-desc {
+            color: #475569;
+            line-height: 1.45;
+            margin: 0;
+            font-size: 0.9rem;
+            display: -webkit-box;
+            -webkit-line-clamp: 2;
+            -webkit-box-orient: vertical;
+            overflow: hidden;
+            flex: 0 1 auto;
+            min-height: 0;
+        }
+
+        .room-card .carousel-card-desc ul {
+            margin: 0;
+            padding-left: 1.05rem;
+        }
+
+        .room-card .carousel-card-footer {
+            display: flex;
+            flex-direction: column;
+            gap: 0.45rem;
+            margin-top: 0.35rem;
+            padding-top: 0.5rem;
+            flex-shrink: 0;
+        }
+
+        .cottage-card .carousel-card-footer {
+            display: flex;
+            flex-direction: column;
+            gap: 0.45rem;
+            margin-top: auto;
+            padding-top: 0.65rem;
+            flex-shrink: 0;
+        }
+
+        .room-card .carousel-card-actions,
+        .cottage-card .carousel-card-actions {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            gap: 0.75rem;
+        }
+
+        .room-card .carousel-card-price,
+        .cottage-card .carousel-card-price {
+            color: #ff7a3d;
+            font-weight: 700;
+            white-space: nowrap;
+        }
+
+        .room-card .carousel-card-buttons,
+        .cottage-card .carousel-card-buttons {
+            display: flex;
+            gap: 0.5rem;
+            flex-shrink: 0;
+        }
+
+        .room-card .carousel-card-buttons button,
+        .cottage-card .carousel-card-buttons button {
+            border: none;
+            padding: 0.7rem 1.1rem;
+            border-radius: 999px;
+            cursor: pointer;
+            font-weight: 700;
+            font-size: 0.9rem;
+            line-height: 1.2;
+            white-space: nowrap;
+        }
+
+        .room-card .btn-details,
+        .cottage-card .btn-details {
+            background: #1e3a8a;
+            color: #fff;
+        }
+
+        .room-card .btn-add-item,
+        .cottage-card .btn-add-item {
+            background: #ff7a3d;
+            color: #fff;
         }
 
         /* Remove any space from flash messages or other elements */
@@ -285,22 +463,7 @@ $pageHead = <<<PAGE_HEAD
         }
 
         .btn-select-date {
-            background: #ffffff;
-            border: 2px solid #d9e2ec;
-            color: #102a43;
-            font-weight: 700;
-            padding: 0.9rem 1.5rem;
-            border-radius: 999px;
-            cursor: pointer;
-            transition: all 0.25s ease;
-            display: inline-flex;
-            align-items: center;
-            gap: 0.5rem;
-        }
-
-        .btn-select-date:hover {
-            border-color: #ff7a3d;
-            color: #ff7a3d;
+            display: none;
         }
 
         .booking-controls {
@@ -312,8 +475,7 @@ $pageHead = <<<PAGE_HEAD
             margin-bottom: 2rem;
         }
 
-        .tab-buttons,
-        .toggle-buttons {
+        .tab-buttons {
             display: inline-flex;
             border-radius: 999px;
             background: #ffffff;
@@ -321,8 +483,7 @@ $pageHead = <<<PAGE_HEAD
             overflow: hidden;
         }
 
-        .tab-button,
-        .toggle-button {
+        .tab-button {
             border: none;
             padding: 0.85rem 1.5rem;
             background: transparent;
@@ -332,10 +493,61 @@ $pageHead = <<<PAGE_HEAD
             transition: all 0.25s ease;
         }
 
-        .tab-button.active,
-        .toggle-button.active {
+        .tab-button.active {
             background: #ff7a3d;
             color: #ffffff;
+        }
+
+
+
+        .right-controls {
+            display: flex;
+            align-items: center;
+            gap: 0.5rem;
+            background: #ffffff;
+            border-radius: 999px;
+            padding: 0.5rem;
+            box-shadow: 0 10px 30px rgba(15, 23, 42, 0.08);
+        }
+
+        .control-item {
+            padding: 0.75rem 1.25rem;
+            border: none;
+            background: transparent;
+            cursor: pointer;
+            font-weight: 700;
+            color: #334e68;
+            transition: all 0.25s ease;
+            border-radius: 999px;
+            display: flex;
+            align-items: center;
+            gap: 0.5rem;
+            white-space: nowrap;
+        }
+
+        .control-item:hover {
+            background: #f1f5f9;
+        }
+
+        .control-item.active {
+            background: #ff7a3d;
+            color: #ffffff;
+        }
+
+        .control-divider {
+            width: 1px;
+            height: 24px;
+            background: #e2e8f0;
+            margin: 0 0.25rem;
+            flex-shrink: 0;
+        }
+
+        .total-price-display {
+            padding: 0.75rem 1.25rem;
+            font-weight: 700;
+            color: #102a43;
+            background: transparent;
+            white-space: nowrap;
         }
 
         .btn-view-reservation {
@@ -384,7 +596,8 @@ $pageHead = <<<PAGE_HEAD
             min-width: 280px;
             display: flex;
             flex-direction: column;
-            min-height: 320px;
+            min-height: 360px;
+            height: auto;
             background: #ffffff;
             border-radius: 1rem;
             border: 1px solid #e2e8f0;
@@ -723,8 +936,9 @@ $pageHead = <<<PAGE_HEAD
             gap: 0.5rem;
             align-items: center;
             justify-content: space-between;
-            padding: 0.75rem 1rem 1rem 1rem;
+            padding: 0.85rem 1rem 1.15rem 1rem;
             margin-top: auto;
+            flex-shrink: 0;
         }
 
         .booking-card-actions {
@@ -853,11 +1067,70 @@ $pageHead = <<<PAGE_HEAD
             background: #e2e8f0;
             min-height: 320px;
             border-radius: 1.25rem;
-            display: flex;
-            align-items: center;
-            justify-content: center;
+            display: grid;
+            grid-template-rows: minmax(260px, 1fr) auto;
+            gap: 0.75rem;
+            padding: 0.75rem;
+            overflow: hidden;
             color: #64748b;
             font-size: 2.5rem;
+        }
+
+        .booking-album-main {
+            position: relative;
+            min-height: 260px;
+            overflow: hidden;
+            border-radius: 0.9rem;
+            background: #cbd5e1;
+        }
+
+        .booking-album-main img {
+            width: 100%;
+            height: 100%;
+            object-fit: cover;
+            display: block;
+        }
+
+        .booking-album-nav {
+            position: absolute;
+            top: 50%;
+            transform: translateY(-50%);
+            width: 2.25rem;
+            height: 2.25rem;
+            border: 0;
+            border-radius: 50%;
+            background: rgba(15, 23, 42, 0.75);
+            color: #fff;
+            cursor: pointer;
+        }
+
+        .booking-album-nav.prev { left: 0.75rem; }
+        .booking-album-nav.next { right: 0.75rem; }
+
+        .booking-album-thumbnails {
+            display: flex;
+            gap: 0.5rem;
+            overflow-x: auto;
+            padding: 0.1rem;
+        }
+
+        .booking-album-thumbnail {
+            width: 58px;
+            height: 48px;
+            flex: 0 0 auto;
+            padding: 0;
+            border: 2px solid transparent;
+            border-radius: 0.5rem;
+            overflow: hidden;
+            background: #fff;
+            cursor: pointer;
+        }
+
+        .booking-album-thumbnail.active { border-color: #ff7a3d; }
+        .booking-album-thumbnail img { width: 100%; height: 100%; object-fit: cover; display: block; }
+
+        @media (max-width: 700px) {
+            .booking-modal-grid { grid-template-columns: 1fr; }
         }
 
         .booking-modal-details {
@@ -977,22 +1250,42 @@ $pageHead = <<<PAGE_HEAD
             .fees-container {
                 grid-template-columns: 1fr;
             }
+
+            .booking-controls {
+                flex-direction: column;
+                align-items: stretch;
+            }
+
+            .right-controls {
+                flex-wrap: wrap;
+                justify-content: center;
+            }
+
+            .control-item {
+                padding: 0.6rem 1rem;
+                font-size: 0.9rem;
+            }
+
+            .total-price-display {
+                padding: 0.6rem 1rem;
+                font-size: 0.9rem;
+            }
         }
 
         /* Reservation Modal Styles */
         .reservation-modal {
-            position: fixed;
-            inset: 0;
+            position: fixed !important;
+            inset: 0 !important;
             background: rgba(15, 23, 42, 0.75);
-            display: none;
+            display: none !important;
             align-items: center;
             justify-content: center;
-            z-index: 9999;
+            z-index: 10000 !important;
             padding: 1rem;
         }
 
         .reservation-modal.open {
-            display: flex;
+            display: flex !important;
         }
 
         .reservation-modal-content {
@@ -1116,11 +1409,10 @@ PAGE_HEAD;
     <main class="booking-page" style="margin-top: 0; padding-top: 0;">
         <div class="booking-header">
             <h1>Start your booking now!</h1>
-            <button class="btn-select-date" onclick="openDatePickerModal()"><i class="fas fa-calendar-day"></i> Select Date</button>
         </div>
 
         <!-- Date Selection Notice -->
-        <div id="dateNotice" style="background: #fff3cd; border: 2px solid #ffc107; border-radius: 0.75rem; padding: 1rem 1.5rem; margin-bottom: 1.5rem; display: flex; align-items: center;">
+        <div id="dateSelectionNotice" style="background: #fff3cd; border: 2px solid #ffc107; border-radius: 0.75rem; padding: 1rem 1.5rem; margin-bottom: 1.5rem; display: flex; align-items: center;">
             <span style="color: #856404; font-weight: 600;">Please select a reservation date first before adding rooms or cottages to your booking.</span>
         </div>
 
@@ -1129,18 +1421,15 @@ PAGE_HEAD;
                 <button class="tab-button active" data-tab="rooms">Rooms</button>
                 <button class="tab-button" data-tab="cottages">Cottages</button>
             </div>
-            <div style="display:flex; align-items:center; gap:1rem;">
-                <div style="background:#fff; padding:0.75rem 1rem; border-radius:12px; border:1px solid #e8eef6; display:flex; gap:1rem; align-items:center;">
-                    <div>
-                        <div style="font-size:0.85rem; color:#64748b;">Total Price:</div>
-                        <div style="font-weight:700; color:#102a43;"> <span id="miniTotal">₱#,###,##</span></div>
-                    </div>
-                </div>
-                <button class="btn-view-reservation" onclick="openReservationModal()"><i class="fas fa-eye"></i> View Reservation</button>
-            </div>
-            <div class="toggle-buttons">
-                <button class="toggle-button active" data-toggle="day">Day</button>
-                <button class="toggle-button" data-toggle="night">Night</button>
+            <div class="right-controls">
+                <button class="control-item active" data-toggle="day">Day</button>
+                <button class="control-item" data-toggle="night">Night</button>
+                <div class="control-divider"></div>
+                <button class="control-item" onclick="openDatePickerModal()">Select Date</button>
+                <div class="control-divider"></div>
+                <button class="control-item" id="viewReservationBtn" onclick="openReservationModal()"><i class="fas fa-eye"></i> View Reservation</button>
+                <div class="control-divider"></div>
+                <div class="total-price-display">Total: <span id="miniTotal">₱0.00</span></div>
             </div>
         </div>
 
@@ -1153,33 +1442,38 @@ PAGE_HEAD;
                             <i class="fas fa-chevron-left"></i>
                         </button>
 
-                        <div class="slider-stage" style="width: 100%; max-width: 760px; height: 500px; position: relative; transform-style: preserve-3d; transition: transform 0.8s ease;">
+                        <div class="slider-stage">
                             <?php if (!empty($rooms)): ?>
                                 <?php foreach ($rooms as $index => $roomItem): ?>
-                                <?php $roomImage = basename($roomItem['image_url'] ?? ''); ?>
-                                <?php $roomDetail = $roomDetailsMap[$roomImage] ?? null; ?>
                                 <?php
                                 $roomName = $roomItem['name'];
-                                $isAvailable = !empty($selectedDate) && isset($availabilityData[$roomName]) ? $availabilityData[$roomName]['available'] > 0 : true;
-                                $availabilityInfo = isset($availabilityData[$roomName]) ? $availabilityData[$roomName] : ['limit' => 0, 'booked' => 0, 'available' => 0];
+                                $isAvailable = !empty($selectedDate) && isset($initialAvailabilityData[$roomName]) ? $initialAvailabilityData[$roomName]['available'] > 0 : true;
+                                $availabilityInfo = isset($initialAvailabilityData[$roomName]) ? $initialAvailabilityData[$roomName] : ['limit' => 0, 'booked' => 0, 'available' => 0];
+                                $roomInclusionsHtml = renderRoomInclusionsHtml($roomName, true);
+                                $roomDescription = $roomItem['description'] ?? '';
                                 ?>
-                                <div class="room-card room-card-<?php echo $index; ?>" data-type="rooms" data-room-name="<?php echo htmlspecialchars($roomName); ?>" style="position: absolute; top: 0; left: 50%; width: 360px; height: 480px; transform-style: preserve-3d; transform-origin: center center; transition: transform 0.8s ease, opacity 0.8s ease;">
-                                    <div style="width: 100%; height: 100%; border-radius: 28px; overflow: hidden; box-shadow: 0 28px 60px rgba(15, 23, 42, 0.14); background: #fff; display: flex; flex-direction: column;">
-                                        <img src="<?php echo htmlspecialchars(resolveImageUrl($roomItem['image_url'] ?? '', SITE_URL . 'images/standard.jpg')); ?>" alt="<?php echo htmlspecialchars($roomItem['name'] ?? 'Room'); ?>" style="width: 100%; height: 220px; object-fit: cover; display: block; flex-shrink: 0;">
-                                        <div style="padding: 1.5rem; flex: 1; display: flex; flex-direction: column;">
-                                            <h3 style="color: #1e3a8a; font-size: 1.6rem; margin-bottom: 0.75rem; margin-top: 0;"><?php echo htmlspecialchars($roomItem['name'] ?? 'Room'); ?></h3>
-                                            <p style="color: #475569; line-height: 1.6; margin-bottom: 0.75rem; margin-top: 0;">Good for <?php echo (int)($roomItem['capacity'] ?? 0); ?> pax • <?php echo !empty($roomItem['available']) ? 'Available' : 'Unavailable'; ?></p>
-                                            <p style="color: #475569; line-height: 1.8; margin-bottom: auto; margin-top: 0;"><?php echo htmlspecialchars($roomItem['description'] ?? ''); ?></p>
-                                            <div style="display: flex; flex-direction: column; gap: 0.5rem; margin-top: 1rem;">
+                                <div class="room-card room-card-<?php echo $index; ?>" data-type="rooms" data-room-name="<?php echo htmlspecialchars($roomName); ?>" style="position: absolute; top: 0; left: 50%; transform-style: preserve-3d; transform-origin: center center; transition: transform 0.8s ease, opacity 0.8s ease;">
+                                    <div class="carousel-card-inner">
+                                        <img class="carousel-card-image" src="<?php echo htmlspecialchars(resolveImageUrl($roomItem['image_url'] ?? '', SITE_URL . 'images/standard.jpg')); ?>" alt="<?php echo htmlspecialchars($roomItem['name'] ?? 'Room'); ?>">
+                                        <div class="carousel-card-body">
+                                            <h3><?php echo htmlspecialchars($roomItem['name'] ?? 'Room'); ?></h3>
+                                            <div class="carousel-card-desc">
+                                                <?php if ($roomInclusionsHtml !== ''): ?>
+                                                    <?php echo $roomInclusionsHtml; ?>
+                                                <?php else: ?>
+                                                    <p style="margin:0; color:#475569;"><?php echo htmlspecialchars($roomDescription); ?></p>
+                                                <?php endif; ?>
+                                            </div>
+                                            <div class="carousel-card-footer">
                                                 <div style="display: flex; align-items: center; gap: 0.5rem;">
                                                     <span style="color: #475569; font-size: 0.9rem;">Available:</span>
-                                                    <span class="availability-display" data-room-name="<?php echo htmlspecialchars($roomName); ?>" data-initial-available="<?php echo $availabilityInfo['available']; ?>" style="color: #10b981; font-weight: 700; font-size: 0.9rem;"><?php echo !empty($selectedDate) ? ($isAvailable ? $availabilityInfo['available'] . ' slots' : 'Fully booked') : 'Select date'; ?></span>
+                                                    <span class="availability-display" data-room-name="<?php echo htmlspecialchars($roomName); ?>" data-initial-available="<?php echo $availabilityInfo['available']; ?>" style="color: #10b981; font-weight: 700; font-size: 0.9rem;"><?php echo !empty($selectedDate) ? ($isAvailable ? $availabilityInfo['available'] . ' ' . $initialTourType . ' slots' : 'Fully booked') : 'Select date'; ?></span>
                                                 </div>
-                                                <div style="display: flex; align-items: center; justify-content: space-between; gap: 1rem; margin-top: 0.5rem;">
-                                                    <span style="color: #ff7a3d; font-weight: 700;">₱<?php echo number_format((float)($roomItem['price_per_night'] ?? 0), 2); ?></span>
-                                                    <div style="display: flex; gap: 0.5rem;">
-                                                        <button type="button" onclick="openBookingModal(this)" data-name="<?php echo htmlspecialchars($roomItem['name'], ENT_QUOTES); ?>" data-description="<?php echo htmlspecialchars($roomItem['description'], ENT_QUOTES); ?>" data-price="₱<?php echo number_format($roomItem['price_per_night'], 2); ?>" data-capacity="<?php echo htmlspecialchars($roomItem['capacity'], ENT_QUOTES); ?>" data-summary="<?php echo htmlspecialchars($roomDetail['summary'] ?? '', ENT_QUOTES); ?>" data-extras="<?php echo htmlspecialchars($roomDetail['extras'] ?? '', ENT_QUOTES); ?>" data-image="<?php echo htmlspecialchars(resolveImageUrl($roomItem['image_url'] ?? ''), ENT_QUOTES); ?>" data-price-num="<?php echo $roomItem['price_per_night']; ?>" style="background: #1e3a8a; color: white; border: none; padding: 0.8rem 1.2rem; border-radius: 999px; cursor: pointer; font-weight: 700;">Details</button>
-                                                        <button type="button" onclick="addToReservation('room', <?php echo $roomItem['id']; ?>, '<?php echo htmlspecialchars($roomItem['name'], ENT_QUOTES); ?>', <?php echo $roomItem['price_per_night']; ?>, <?php echo $roomItem['capacity']; ?>)" style="background: #ff7a3d; color: white; border: none; padding: 0.8rem 1.2rem; border-radius: 999px; cursor: pointer; font-weight: 700;">Add</button>
+                                                <div class="carousel-card-actions">
+                                                    <span class="carousel-card-price">₱<?php echo number_format((float)($roomItem['price_per_night'] ?? 0), 2); ?></span>
+                                                    <div class="carousel-card-buttons">
+                                                        <button type="button" class="btn-details" onclick="openBookingModal(this)" data-name="<?php echo htmlspecialchars($roomItem['name'], ENT_QUOTES); ?>" data-description="<?php echo htmlspecialchars($roomDescription, ENT_QUOTES); ?>" data-price="₱<?php echo number_format($roomItem['price_per_night'], 2); ?>" data-capacity="<?php echo htmlspecialchars($roomItem['capacity'], ENT_QUOTES); ?>" data-image="<?php echo htmlspecialchars(resolveImageUrl($roomItem['image_url'] ?? ''), ENT_QUOTES); ?>" data-images="<?php echo htmlspecialchars(json_encode(getBookingAlbumImages($roomItem['name'], $roomItem['image_url'] ?? '', 'room', (int)$roomItem['id'])), ENT_QUOTES); ?>" data-price-num="<?php echo $roomItem['price_per_night']; ?>">Details</button>
+                                                        <button type="button" class="btn-add-item" onclick="addToReservation('room', <?php echo $roomItem['id']; ?>, '<?php echo htmlspecialchars($roomItem['name'], ENT_QUOTES); ?>', <?php echo $roomItem['price_per_night']; ?>, <?php echo $roomItem['capacity']; ?>)">Add</button>
                                                     </div>
                                                 </div>
                                             </div>
@@ -1207,31 +1501,31 @@ PAGE_HEAD;
                             <i class="fas fa-chevron-left"></i>
                         </button>
 
-                        <div class="cottage-slider-stage" style="width: 100%; max-width: 760px; height: 500px; position: relative; transform-style: preserve-3d; transition: transform 0.8s ease;">
+                        <div class="cottage-slider-stage">
                             <?php if (!empty($cottages)): ?>
                                 <?php foreach ($cottages as $index => $cottage): ?>
                                 <?php
                                 $cottageName = $cottage['name'];
-                                $isAvailable = !empty($selectedDate) && isset($availabilityData[$cottageName]) ? $availabilityData[$cottageName]['available'] > 0 : true;
-                                $availabilityInfo = isset($availabilityData[$cottageName]) ? $availabilityData[$cottageName] : ['limit' => 0, 'booked' => 0, 'available' => 0];
+                                $isAvailable = !empty($selectedDate) && isset($initialAvailabilityData[$cottageName]) ? $initialAvailabilityData[$cottageName]['available'] > 0 : true;
+                                $availabilityInfo = isset($initialAvailabilityData[$cottageName]) ? $initialAvailabilityData[$cottageName] : ['limit' => 0, 'booked' => 0, 'available' => 0];
                                 ?>
-                                <div class="cottage-card cottage-card-<?php echo $index; ?>" data-type="cottages" data-room-name="<?php echo htmlspecialchars($cottageName); ?>" style="position: absolute; top: 0; left: 50%; width: 360px; height: 480px; transform-style: preserve-3d; transform-origin: center center; transition: transform 0.8s ease, opacity 0.8s ease;">
-                                    <div style="width: 100%; height: 100%; border-radius: 28px; overflow: hidden; box-shadow: 0 28px 60px rgba(15, 23, 42, 0.14); background: #fff; display: flex; flex-direction: column;">
-                                        <img src="<?php echo htmlspecialchars(resolveImageUrl($cottage['image_url'] ?? '', SITE_URL . 'images/cottage.jpg')); ?>" alt="<?php echo htmlspecialchars($cottage['name'] ?? 'Cottage'); ?>" style="width: 100%; height: 220px; object-fit: cover; display: block; flex-shrink: 0;">
-                                        <div style="padding: 1.5rem; flex: 1; display: flex; flex-direction: column;">
-                                            <h3 style="color: #1e3a8a; font-size: 1.6rem; margin-bottom: 0.75rem; margin-top: 0;"><?php echo htmlspecialchars($cottage['name'] ?? 'Cottage'); ?></h3>
-                                            <p style="color: #475569; line-height: 1.6; margin-bottom: 0.75rem; margin-top: 0;">Good for <?php echo (int)($cottage['capacity'] ?? 0); ?> pax • <?php echo !empty($cottage['available']) ? 'Available' : 'Unavailable'; ?></p>
-                                            <p style="color: #475569; line-height: 1.8; margin-bottom: auto; margin-top: 0;"><?php echo htmlspecialchars($cottage['description'] ?? ''); ?></p>
-                                            <div style="display: flex; flex-direction: column; gap: 0.5rem; margin-top: 1rem;">
+                                <div class="cottage-card cottage-card-<?php echo $index; ?>" data-type="cottages" data-room-name="<?php echo htmlspecialchars($cottageName); ?>" style="position: absolute; top: 0; left: 50%; transform-style: preserve-3d; transform-origin: center center; transition: transform 0.8s ease, opacity 0.8s ease;">
+                                    <div class="carousel-card-inner">
+                                        <img class="carousel-card-image" src="<?php echo htmlspecialchars(resolveImageUrl($cottage['image_url'] ?? '', SITE_URL . 'images/cottage.jpg')); ?>" alt="<?php echo htmlspecialchars($cottage['name'] ?? 'Cottage'); ?>">
+                                        <div class="carousel-card-body">
+                                            <h3><?php echo htmlspecialchars($cottage['name'] ?? 'Cottage'); ?></h3>
+                                            <p class="carousel-card-meta">Good for <?php echo (int)($cottage['capacity'] ?? 0); ?> pax • <?php echo !empty($cottage['available']) ? 'Available' : 'Unavailable'; ?></p>
+                                            <p class="carousel-card-desc"><?php echo htmlspecialchars($cottage['description'] ?? ''); ?></p>
+                                            <div class="carousel-card-footer">
                                                 <div style="display: flex; align-items: center; gap: 0.5rem;">
                                                     <span style="color: #475569; font-size: 0.9rem;">Available:</span>
-                                                    <span class="availability-display" data-room-name="<?php echo htmlspecialchars($cottageName); ?>" data-initial-available="<?php echo $availabilityInfo['available']; ?>" style="color: #10b981; font-weight: 700; font-size: 0.9rem;"><?php echo !empty($selectedDate) ? ($isAvailable ? $availabilityInfo['available'] . ' slots' : 'Fully booked') : 'Select date'; ?></span>
+                                                    <span class="availability-display" data-room-name="<?php echo htmlspecialchars($cottageName); ?>" data-initial-available="<?php echo $availabilityInfo['available']; ?>" style="color: #10b981; font-weight: 700; font-size: 0.9rem;"><?php echo !empty($selectedDate) ? ($isAvailable ? $availabilityInfo['available'] . ' ' . $initialTourType . ' slots' : 'Fully booked') : 'Select date'; ?></span>
                                                 </div>
-                                                <div style="display: flex; align-items: center; justify-content: space-between; gap: 1rem; margin-top: 0.5rem;">
-                                                    <span style="color: #ff7a3d; font-weight: 700;">₱<?php echo number_format((float)($cottage['price_per_night'] ?? 0), 2); ?></span>
-                                                    <div style="display: flex; gap: 0.5rem;">
-                                                        <button type="button" onclick="openBookingModal(this)" data-name="<?php echo htmlspecialchars($cottage['name'], ENT_QUOTES); ?>" data-description="<?php echo htmlspecialchars($cottage['description'], ENT_QUOTES); ?>" data-price="₱<?php echo number_format($cottage['price_per_night'], 2); ?>" data-capacity="<?php echo htmlspecialchars($cottage['capacity'], ENT_QUOTES); ?>" data-image="<?php echo htmlspecialchars(resolveImageUrl($cottage['image_url'] ?? ''), ENT_QUOTES); ?>" data-price-num="<?php echo $cottage['price_per_night']; ?>" style="background: #1e3a8a; color: white; border: none; padding: 0.8rem 1.2rem; border-radius: 999px; cursor: pointer; font-weight: 700;">Details</button>
-                                                        <button type="button" onclick="addToReservation('cottage', <?php echo $cottage['id']; ?>, '<?php echo htmlspecialchars($cottage['name'], ENT_QUOTES); ?>', <?php echo $cottage['price_per_night']; ?>, <?php echo $cottage['capacity']; ?>)" style="background: #ff7a3d; color: white; border: none; padding: 0.8rem 1.2rem; border-radius: 999px; cursor: pointer; font-weight: 700;">Add</button>
+                                                <div class="carousel-card-actions">
+                                                    <span class="carousel-card-price">₱<?php echo number_format((float)($cottage['price_per_night'] ?? 0), 2); ?></span>
+                                                    <div class="carousel-card-buttons">
+                                                        <button type="button" class="btn-details" onclick="openBookingModal(this)" data-name="<?php echo htmlspecialchars($cottage['name'], ENT_QUOTES); ?>" data-description="<?php echo htmlspecialchars($cottage['description'], ENT_QUOTES); ?>" data-price="₱<?php echo number_format($cottage['price_per_night'], 2); ?>" data-capacity="<?php echo htmlspecialchars($cottage['capacity'], ENT_QUOTES); ?>" data-image="<?php echo htmlspecialchars(resolveImageUrl($cottage['image_url'] ?? ''), ENT_QUOTES); ?>" data-images="<?php echo htmlspecialchars(json_encode(getBookingAlbumImages($cottage['name'], $cottage['image_url'] ?? '', 'cottage', (int)$cottage['id'])), ENT_QUOTES); ?>" data-price-num="<?php echo $cottage['price_per_night']; ?>">Details</button>
+                                                        <button type="button" class="btn-add-item" onclick="addToReservation('cottage', <?php echo $cottage['id']; ?>, '<?php echo htmlspecialchars($cottage['name'], ENT_QUOTES); ?>', <?php echo $cottage['price_per_night']; ?>, <?php echo $cottage['capacity']; ?>)">Add</button>
                                                     </div>
                                                 </div>
                                             </div>
@@ -1370,11 +1664,46 @@ PAGE_HEAD;
             night: { adult: 180, child: 100, senior: 144 }
         };
         // Day tour = 8AM-5PM (day use only)
-        // Night functionality removed - no rate difference
-        let currentDayNight = 'day';
+        // Night tour = overnight (checkout next day)
+        let currentDayNight = '<?php echo $initialTourType; ?>';
+
+        function formatLocalYmd(dateObj) {
+            const y = dateObj.getFullYear();
+            const m = String(dateObj.getMonth() + 1).padStart(2, '0');
+            const d = String(dateObj.getDate()).padStart(2, '0');
+            return `${y}-${m}-${d}`;
+        }
+
+        function parseYmdLocal(ymd) {
+            const parts = String(ymd || '').split('-').map(Number);
+            if (parts.length !== 3 || parts.some((n, i) => i < 3 && Number.isNaN(n))) {
+                return new Date(ymd);
+            }
+            return new Date(parts[0], parts[1] - 1, parts[2]);
+        }
+
+        // Day tour: same calendar day | Night tour: checkout is next day
+        function resolveCheckoutDate(checkInYmd, tourType) {
+            const selected = parseYmdLocal(checkInYmd);
+            if (tourType === 'night') {
+                const tomorrow = new Date(selected);
+                tomorrow.setDate(tomorrow.getDate() + 1);
+                return formatLocalYmd(tomorrow);
+            }
+            return formatLocalYmd(selected);
+        }
+
+        function applyTourCheckoutDates(checkInYmd) {
+            const checkInInput = document.getElementById('checkInDate');
+            const checkOutInput = document.getElementById('checkOutDate');
+            if (!checkInInput || !checkOutInput || !checkInYmd) return;
+            checkInInput.value = checkInYmd;
+            checkOutInput.value = resolveCheckoutDate(checkInYmd, currentDayNight);
+        }
         
         // Availability data from server
         const availabilityData = <?php echo json_encode($availabilityData); ?>;
+        let activeAvailabilityData = availabilityData[currentDayNight] || {};
 
         // Show unavailable popup notification
         function showUnavailablePopup(roomName) {
@@ -1432,7 +1761,7 @@ PAGE_HEAD;
             overlay.onclick = closePopup;
             
             setTimeout(() => {
-                const closeBtn = document.getElementById('unavailableCloseBtn');
+                const closeBtn = popup.querySelector('#unavailableCloseBtn');
                 if (closeBtn) {
                     closeBtn.onclick = closePopup;
                 }
@@ -1506,8 +1835,8 @@ PAGE_HEAD;
             overlay.onclick = closePopup;
             
             setTimeout(() => {
-                const okBtn = document.getElementById('exceededOkBtn');
-                const viewBtn = document.getElementById('exceededViewBtn');
+                const okBtn = popup.querySelector('#exceededOkBtn');
+                const viewBtn = popup.querySelector('#exceededViewBtn');
                 
                 if (okBtn) {
                     okBtn.onclick = closePopup;
@@ -1549,7 +1878,7 @@ PAGE_HEAD;
                 <p style="color:#64748b; margin:0 0 1rem 0;">Price: ₱${price.toLocaleString('en-PH', {minimumFractionDigits: 2})}${remainingText}</p>
                 <div style="display:flex; gap:0.75rem; justify-content:center;">
                     <button id="continueBtn" style="background:#6b7280; color:white; border:none; padding:0.6rem 1rem; border-radius:8px; font-weight:700; cursor:pointer;">Continue</button>
-                    <button id="viewReservationBtn" style="background:#ff7a3d; color:white; border:none; padding:0.6rem 1rem; border-radius:8px; font-weight:700; cursor:pointer;">View Reservation</button>
+                    <button id="addedViewReservationBtn" style="background:#ff7a3d; color:white; border:none; padding:0.6rem 1rem; border-radius:8px; font-weight:700; cursor:pointer;">View Reservation</button>
                 </div>
             `;
 
@@ -1567,8 +1896,8 @@ PAGE_HEAD;
             
             // Add event listeners to buttons
             setTimeout(() => {
-                const continueBtn = document.getElementById('continueBtn');
-                const viewReservationBtn = document.getElementById('viewReservationBtn');
+                const continueBtn = popup.querySelector('#continueBtn');
+                const viewReservationBtn = popup.querySelector('#addedViewReservationBtn');
                 
                 if (continueBtn) {
                     continueBtn.onclick = closePopup;
@@ -1598,17 +1927,23 @@ PAGE_HEAD;
                 return;
             }
 
+            // A reservation has one tour type, so do not mix day and night items.
+            if (reservationCart.length > 0 && reservationCart.some(item => item.tourType !== currentDayNight)) {
+                showReservationToast('Your reservation already contains ' + (currentDayNight === 'day' ? 'night' : 'day') + '-tour items. Remove them before adding this tour type.');
+                return;
+            }
+
             // Check availability for the selected date
-            if (!availabilityData || !availabilityData[name]) {
+            if (!activeAvailabilityData || !activeAvailabilityData[name]) {
                 alert('Availability data not available. Please refresh the page and try again.');
                 return;
             }
 
-            const itemAvailability = availabilityData[name];
+            const itemAvailability = activeAvailabilityData[name];
             const availableCount = itemAvailability.available;
             
             // Count how many of this item are already in the cart
-            const currentInCart = reservationCart.filter(item => item.name === name).length;
+            const currentInCart = reservationCart.filter(item => item.name === name && item.tourType === currentDayNight).length;
             
             // Check if adding another would exceed availability
             if (currentInCart >= availableCount) {
@@ -1664,20 +1999,21 @@ PAGE_HEAD;
 
         // Update availability badges based on cart contents
         function updateAvailabilityBadges() {
-            if (!availabilityData) return;
+            if (!activeAvailabilityData) return;
 
             // Count items in cart by name
             const cartCounts = {};
             reservationCart.forEach(item => {
+                if (item.tourType !== currentDayNight) return;
                 cartCounts[item.name] = (cartCounts[item.name] || 0) + 1;
             });
 
             // Update each booking card's availability badge
             document.querySelectorAll('.booking-card').forEach(card => {
                 const roomName = card.getAttribute('data-room-name');
-                if (!roomName || !availabilityData[roomName]) return;
+                if (!roomName || !activeAvailabilityData[roomName]) return;
 
-                const itemAvailability = availabilityData[roomName];
+                const itemAvailability = activeAvailabilityData[roomName];
                 const inCart = cartCounts[roomName] || 0;
                 const remaining = Math.max(0, itemAvailability.available - inCart);
 
@@ -1700,14 +2036,14 @@ PAGE_HEAD;
             // Update availability displays on 3D carousel cards
             document.querySelectorAll('.availability-display').forEach(display => {
                 const roomName = display.getAttribute('data-room-name');
-                if (!roomName || !availabilityData[roomName]) return;
+                if (!roomName || !activeAvailabilityData[roomName]) return;
 
-                const itemAvailability = availabilityData[roomName];
+                const itemAvailability = activeAvailabilityData[roomName];
                 const inCart = cartCounts[roomName] || 0;
                 const remaining = Math.max(0, itemAvailability.available - inCart);
 
                 if (remaining > 0) {
-                    display.textContent = remaining + ' slots';
+                    display.textContent = remaining + ' ' + currentDayNight + ' slots';
                     display.style.color = '#10b981';
                 } else {
                     display.textContent = 'Fully booked';
@@ -1726,8 +2062,8 @@ PAGE_HEAD;
 
             // Show selected date if available
             if (selectedDate) {
-                const formattedDate = new Date(selectedDate).toLocaleDateString('en-PH', { 
-                    month: 'long', 
+                const formattedDate = new Date(selectedDate).toLocaleDateString('en-PH', {
+                    month: 'long',
                     day: 'numeric',
                     year: 'numeric'
                 });
@@ -1775,34 +2111,29 @@ PAGE_HEAD;
                 });
                 itemsContainer.innerHTML = itemsHtml;
                 if (summarySection) summarySection.style.display = 'block';
-                
-                // Set dates - use selected date if available, otherwise use today/tomorrow
-                const checkInInput = document.getElementById('checkInDate');
-                const checkOutInput = document.getElementById('checkOutDate');
-                
+
+                // Set dates from selected date / today, checkout depends on day vs night tour
                 if (selectedDate) {
-                    const selected = new Date(selectedDate);
-                    const tomorrow = new Date(selected);
-                    tomorrow.setDate(tomorrow.getDate() + 1);
-                    checkInInput.value = selected.toISOString().split('T')[0];
-                    checkOutInput.value = tomorrow.toISOString().split('T')[0];
+                    applyTourCheckoutDates(selectedDate);
                 } else {
-                    const today = new Date();
-                    const tomorrow = new Date(today);
-                    tomorrow.setDate(tomorrow.getDate() + 1);
-                    checkInInput.value = today.toISOString().split('T')[0];
-                    checkOutInput.value = tomorrow.toISOString().split('T')[0];
+                    applyTourCheckoutDates(formatLocalYmd(new Date()));
                 }
                 calculateTotal();
             }
 
-            modal.classList.add('open');
+            if (modal) {
+                modal.classList.add('open');
+                modal.style.display = 'flex';
+            }
         }
 
         // Close reservation modal
         function closeReservationModal() {
             const modal = document.getElementById('reservationModal');
-            modal.classList.remove('open');
+            if (modal) {
+                modal.classList.remove('open');
+                modal.style.display = 'none';
+            }
         }
 
         // Remove item from reservation
@@ -1896,7 +2227,7 @@ PAGE_HEAD;
 
             // Entrance fees
             if (totalGuests > 0) {
-                breakdownHtml += '<div style="margin:1rem 0 1rem 0;"><strong style="color:#102a43;">Entrance Fees (${tourLabel})</strong></div>';
+                breakdownHtml += '<div style="margin:1rem 0 1rem 0;"><strong style="color:#102a43;">Entrance Fees</strong></div>';
                 if (adults > 0) {
                     breakdownHtml += `
                         <div class="bill-line-item">
@@ -1932,9 +2263,20 @@ PAGE_HEAD;
         function confirmReservation() {
             // Check if user is logged in
             const isLoggedIn = <?php echo $isLoggedIn ? 'true' : 'false'; ?>;
+            if (typeof window.hasGuestInfo === 'undefined') {
+                window.hasGuestInfo = <?php echo $hasGuestInfo ? 'true' : 'false'; ?>;
+            }
             if (!isLoggedIn) {
                 alert('Please log in to make a reservation.');
                 window.location.href = '<?php echo SITE_URL; ?>google-auth.php?action=login';
+                return;
+            }
+
+            if (!window.hasGuestInfo) {
+                alert('Please provide lead guest information first.');
+                if (typeof openGuestInfoModal === 'function') {
+                    openGuestInfoModal();
+                }
                 return;
             }
 
@@ -1959,9 +2301,9 @@ PAGE_HEAD;
                 return;
             }
 
-            // Calculate nights
-            const checkInDate = new Date(checkIn);
-            const checkOutDate = new Date(checkOut);
+            // Calculate nights (day tour = 1 unit; night tour = overnight span)
+            const checkInDate = parseYmdLocal(checkIn);
+            const checkOutDate = parseYmdLocal(checkOut);
             let nights = 1;
             if (!isNaN(checkInDate) && !isNaN(checkOutDate) && checkOutDate > checkInDate) {
                 nights = Math.ceil((checkOutDate - checkInDate) / (1000 * 60 * 60 * 24));
@@ -1972,7 +2314,7 @@ PAGE_HEAD;
             const reservationData = {
                 selectedDate: selectedDate,
                 checkIn: checkIn,
-                checkOut: checkOut,
+                checkOut: resolveCheckoutDate(checkIn, currentDayNight),
                 adults: adults,
                 children: children,
                 seniors: seniors,
@@ -2016,13 +2358,16 @@ PAGE_HEAD;
             .then(data => {
                 console.log('Response data:', data);
                 if (data.success) {
-                    alert('Reservation submitted successfully! Your booking ID is #' + data.reservation_id + '. Your reservation is now pending approval from our admin team. You will receive a confirmation email once approved.');
+                    showReservationToast('Reservation submitted successfully! Booking ID #' + data.reservation_id + '. Your reservation is pending approval.');
                     closeReservationModal();
                     // Clear the cart
                     reservationCart = [];
                     updateFooterTotal();
                     // Stay on booking page - user can navigate to My Bookings when they want
                 } else {
+                    if (data.require_guest_info && typeof openGuestInfoModal === 'function') {
+                        openGuestInfoModal();
+                    }
                     alert('Error: ' + data.message);
                 }
             })
@@ -2032,7 +2377,7 @@ PAGE_HEAD;
             });
         }
 
-        const toggleButtons = document.querySelectorAll('.toggle-button');
+        const toggleButtons = document.querySelectorAll('.control-item[data-toggle]');
         const bookingCards = document.querySelectorAll('.booking-card');
 
         // Wire toggle buttons (day/night)
@@ -2048,29 +2393,63 @@ PAGE_HEAD;
             const summary = document.getElementById('modalSummary');
             const extras = document.getElementById('modalExtras');
             const imageContainer = document.getElementById('modalImage');
-            
-            console.log('openBookingModal called with:', {
-                name: button.dataset.name,
-                capacity: button.dataset.capacity,
-                price: button.dataset.price
-            });
-            
-            title.textContent = button.dataset.name || 'Room #';
+
+            title.textContent = button.dataset.name || 'Room';
             description.textContent = button.dataset.description || 'Room details are not available.';
             price.textContent = button.dataset.price || '₱0.00';
             capacity.textContent = button.dataset.capacity ? button.dataset.capacity + ' people' : '0 people';
             status.textContent = 'Available';
-            summary.textContent = button.dataset.summary || '';
-            extras.textContent = button.dataset.extras || '';
+            if (summary) summary.textContent = '';
+            if (extras) extras.textContent = '';
 
-            const imageUrl = button.dataset.image || '';
-            if (imageUrl) {
-                imageContainer.innerHTML = '<img src="' + imageUrl + '" alt="' + (button.dataset.name || 'Room') + '" style="width:100%; height:100%; object-fit:cover; border-radius:1rem;">';
-            } else {
-                imageContainer.textContent = 'Image not available';
+            let albumImages = [];
+            try {
+                albumImages = JSON.parse(button.dataset.images || '[]');
+            } catch (error) {
+                albumImages = [];
             }
+            if (albumImages.length === 0 && button.dataset.image) {
+                albumImages = [button.dataset.image];
+            }
+            renderBookingAlbum(imageContainer, albumImages, button.dataset.name || 'Room');
 
             modal.classList.add('open');
+        }
+
+        function renderBookingAlbum(container, images, itemName) {
+            if (!container || images.length === 0) {
+                if (container) container.textContent = 'Image not available';
+                return;
+            }
+
+            let activeIndex = 0;
+            const render = () => {
+                container.innerHTML = `
+                    <div class="booking-album-main">
+                        <img src="${images[activeIndex]}" alt="${itemName} photo ${activeIndex + 1}">
+                        ${images.length > 1 ? '<button type="button" class="booking-album-nav prev" aria-label="Previous image"><i class="fas fa-chevron-left"></i></button><button type="button" class="booking-album-nav next" aria-label="Next image"><i class="fas fa-chevron-right"></i></button>' : ''}
+                    </div>
+                    <div class="booking-album-thumbnails" aria-label="Photo album">
+                        ${images.map((image, index) => `<button type="button" class="booking-album-thumbnail ${index === activeIndex ? 'active' : ''}" data-album-index="${index}" aria-label="View photo ${index + 1}"><img src="${image}" alt=""></button>`).join('')}
+                    </div>
+                `;
+
+                container.querySelector('.prev')?.addEventListener('click', () => {
+                    activeIndex = (activeIndex - 1 + images.length) % images.length;
+                    render();
+                });
+                container.querySelector('.next')?.addEventListener('click', () => {
+                    activeIndex = (activeIndex + 1) % images.length;
+                    render();
+                });
+                container.querySelectorAll('[data-album-index]').forEach(thumbnail => {
+                    thumbnail.addEventListener('click', () => {
+                        activeIndex = Number(thumbnail.dataset.albumIndex);
+                        render();
+                    });
+                });
+            };
+            render();
         }
 
         function closeBookingModal() {
@@ -2078,29 +2457,20 @@ PAGE_HEAD;
             modal.classList.remove('open');
         }
 
-        
+
         function setToggle(mode) {
-            toggleButtons.forEach(btn => btn.classList.toggle('active', btn.dataset.toggle === mode));
+            const toggleItems = document.querySelectorAll('.control-item[data-toggle]');
+            toggleItems.forEach(btn => btn.classList.toggle('active', btn.dataset.toggle === mode));
             currentDayNight = mode;
-            
+            activeAvailabilityData = availabilityData[currentDayNight] || {};
+            updateAvailabilityBadges();
+
             // Recalculate check-out date if dates are set
             const checkInInput = document.getElementById('checkInDate');
-            const checkOutInput = document.getElementById('checkOutDate');
-            if (checkInInput && checkOutInput && checkInInput.value) {
-                const selected = new Date(checkInInput.value);
-                
-                // Update check-out based on new tour type
-                if (mode === 'day') {
-                    // Day tour: same day
-                    checkOutInput.value = selected.toISOString().split('T')[0];
-                } else {
-                    // Night tour: next day
-                    const tomorrow = new Date(selected);
-                    tomorrow.setDate(tomorrow.getDate() + 1);
-                    checkOutInput.value = tomorrow.toISOString().split('T')[0];
-                }
+            if (checkInInput && checkInInput.value) {
+                applyTourCheckoutDates(checkInInput.value);
             }
-            
+
             // Recalculate if reservation modal is open
             if (document.getElementById('reservationModal').classList.contains('open')) {
                 calculateTotal();
@@ -2144,21 +2514,22 @@ PAGE_HEAD;
             }
             
             selectedDate = dateValue;
-            
-            // Update the "Select Date" button to show the selected date
-            const dateBtn = document.querySelector('.btn-select-date');
-            const formattedDate = new Date(selectedDate).toLocaleDateString('en-PH', { 
-                month: 'short', 
+            const formattedDate = new Date(selectedDate).toLocaleDateString('en-PH', {
+                month: 'short',
                 day: 'numeric',
                 year: 'numeric'
             });
-            dateBtn.innerHTML = '<i class="fas fa-check-circle" style="color: #27ae60; margin-right: 0.5rem;"></i> Date: ' + formattedDate;
-            dateBtn.style.background = '#e8f5e9';
-            dateBtn.style.color = '#1b5e20';
-            dateBtn.style.borderColor = '#27ae60';
-            
+
+            // Update the "Select Date" button to show the selected date
+            const dateBtn = document.querySelector('.control-item[onclick*="openDatePickerModal"]');
+            if (dateBtn) {
+                dateBtn.innerHTML = '<i class="fas fa-check-circle" style="color: #27ae60; margin-right: 0.5rem;"></i> Date: ' + formattedDate;
+                dateBtn.style.background = '#e8f5e9';
+                dateBtn.style.color = '#1b5e20';
+            }
+
             // Hide the date notice once a date is selected
-            const dateNotice = document.getElementById('dateNotice');
+            const dateNotice = document.getElementById('dateSelectionNotice');
             if (dateNotice) {
                 dateNotice.style.display = 'none';
             }
@@ -2175,30 +2546,17 @@ PAGE_HEAD;
             dateSection.style.display = 'block';
             
             closeDatePickerModal();
-            
-            alert('Selected date confirmed: ' + formattedDate);
+            sessionStorage.setItem('selectedDateToast', 'Selected date confirmed: ' + formattedDate + '. You can now add rooms or cottages to your reservation.');
             
             // Update check-out date in reservation modal if open
-            const checkInInput = document.getElementById('checkInDate');
-            const checkOutInput = document.getElementById('checkOutDate');
-            if (checkInInput && checkOutInput) {
-                const selected = new Date(selectedDate);
-                
-                // Always use next day (day mode only)
-                const tomorrow = new Date(selected);
-                tomorrow.setDate(tomorrow.getDate() + 1);
-                checkInInput.value = selected.toISOString().split('T')[0];
-                checkOutInput.value = tomorrow.toISOString().split('T')[0];
+            if (selectedDate) {
+                applyTourCheckoutDates(selectedDate);
                 calculateTotal();
             }
             
-            // Delay showing notice to ensure DOM is ready
-            setTimeout(() => {
-                showDateNotice('Date selected: ' + formattedDate + '\nYou can now add rooms or cottages to your reservation.');
-            }, 100);
-
             const urlParams = new URLSearchParams(window.location.search);
             urlParams.set('date', selectedDate);
+            urlParams.set('tour', currentDayNight);
             window.location.search = urlParams.toString();
         }
 
@@ -2325,7 +2683,16 @@ PAGE_HEAD;
 
         document.addEventListener('DOMContentLoaded', () => {
             // Default to day mode and initialize totals
-            setToggle('day');
+            setToggle(currentDayNight);
+
+            // Add event listener to View Reservation button
+            const viewReservationBtn = document.getElementById('viewReservationBtn');
+            if (viewReservationBtn) {
+                viewReservationBtn.addEventListener('click', function(e) {
+                    e.preventDefault();
+                    openReservationModal();
+                });
+            }
 
             // Initialize tab state - show rooms, hide cottages
             switchTab('rooms');
@@ -2344,7 +2711,7 @@ PAGE_HEAD;
             if (miniTotalEl) miniTotalEl.textContent = '₱#,###,##';
 
             if (selectedDate) {
-                const dateBtn = document.querySelector('.btn-select-date');
+                const dateBtn = document.querySelector('.control-item[onclick*="openDatePickerModal"]');
                 const formattedDate = new Date(selectedDate).toLocaleDateString('en-PH', {
                     month: 'short',
                     day: 'numeric',
@@ -2354,10 +2721,9 @@ PAGE_HEAD;
                     dateBtn.innerHTML = '<i class="fas fa-check-circle" style="color: #27ae60; margin-right: 0.5rem;"></i> Date: ' + formattedDate;
                     dateBtn.style.background = '#e8f5e9';
                     dateBtn.style.color = '#1b5e20';
-                    dateBtn.style.borderColor = '#27ae60';
                 }
 
-                const dateNotice = document.getElementById('dateNotice');
+                const dateNotice = document.getElementById('dateSelectionNotice');
                 if (dateNotice) {
                     dateNotice.style.display = 'none';
                 }
@@ -2369,10 +2735,14 @@ PAGE_HEAD;
             // Load initial calendar when modal opens
             const datePickerModal = document.getElementById('datePickerModal');
             if (datePickerModal) {
-                const originalDisplay = document.querySelector('.btn-select-date').onclick;
-                document.querySelector('.btn-select-date').addEventListener('click', () => {
-                    setTimeout(() => loadCalendarAvailability(), 100);
-                });
+                const dateBtn = document.querySelector('.control-item[onclick*="openDatePickerModal"]');
+                if (dateBtn) {
+                    dateBtn.addEventListener('click', () => {
+                        if (typeof loadCalendarAvailability === 'function') {
+                            setTimeout(() => loadCalendarAvailability(), 100);
+                        }
+                    });
+                }
             }
         });
     </script>
@@ -2509,6 +2879,22 @@ PAGE_HEAD;
             }
         `;
         document.head.appendChild(style);
+
+        document.addEventListener('DOMContentLoaded', function() {
+            const selectedDateToast = sessionStorage.getItem('selectedDateToast');
+            if (selectedDateToast) {
+                sessionStorage.removeItem('selectedDateToast');
+                showReservationToast(selectedDateToast);
+            }
+        });
+
+        <?php if (!$hasGuestInfo): ?>
+        document.addEventListener('DOMContentLoaded', function() {
+            if (typeof openGuestInfoModal === 'function') {
+                openGuestInfoModal();
+            }
+        });
+        <?php endif; ?>
     </script>
 </body>
 </html>

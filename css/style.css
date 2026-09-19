@@ -240,8 +240,18 @@ body {
 
 .social-btn-google {
     background: #ffffff;
-    color: #111827;
-    border: 1px solid rgba(226, 232, 240, 0.8);
+    color: #1f1f1f;
+    border: 1px solid #747775;
+    font-weight: 500;
+}
+
+.social-btn-google:hover {
+    background: #f8f9fa;
+    box-shadow: 0 1px 3px rgba(60, 64, 67, 0.3), 0 1px 2px rgba(60, 64, 67, 0.15);
+}
+
+.social-btn-google .google-logo {
+    flex-shrink: 0;
 }
 
 .social-btn-facebook {
@@ -414,7 +424,7 @@ body {
 
 /* ========== HERO SECTION ========== */
 .hero {
-    background: linear-gradient(135deg, var(--primary-blue) 0%, var(--light-blue) 100%);
+    background: linear-gradient(rgba(15, 23, 42, 0.38), rgba(15, 23, 42, 0.52)), url('../images/villasoledadbg.png') center / cover no-repeat;
     color: var(--white);
     padding: 6rem 0;
     text-align: center;
@@ -643,12 +653,7 @@ section h2::after {
 
 /* ========== LOCATION SECTION ========== */
 .location {
-    background-color: var(--bg-light);
-}
-
-.location-header {
-    text-align: center;
-    margin-bottom: 3rem;
+    background: linear-gradient(rgba(15, 23, 42, 0.72), rgba(15, 23, 42, 0.78)), url('../images/villasoledadbg.png') center / cover no-repeat !important;
 }
 
 .resort-info {
@@ -691,7 +696,7 @@ section h2::after {
 
 .map-container {
     display: block;
-    margin-top: 3rem;
+    margin-top: 0;
     text-align: center;
 }
 
@@ -701,9 +706,10 @@ section h2::after {
 
 .map-container iframe {
     width: 100%;
-        max-width: 800px;
-        height: 420px;
-    margin: 0 auto;
+    max-width: none;
+    height: 380px;
+    border: 0;
+    margin: 0;
     display: block;
 }
 
@@ -739,36 +745,93 @@ section h2::after {
     font-size: 0.9rem;
 }
 
-.facade-section h2 {
-    text-align: left;
+.location-facade-layout {
+    display: block;
+    width: 100%;
+    color: #ffffff;
+}
+
+.location-facade-header {
+    text-align: center;
     margin-bottom: 2rem;
 }
 
-.facade-section .facade-grid {
+.location-facade-header h2 {
+    display: inline-block;
+    padding: 0.65rem 1.25rem;
+    color: #ffffff !important;
+    background: transparent;
+    border-radius: 8px;
+    margin: 0;
+}
+
+.location-facade-layout h2,
+.location-facade-layout h3,
+.location-facade-layout p {
+    color: #ffffff !important;
+}
+
+.location-facade-content {
+    display: grid;
+    grid-template-columns: minmax(0, 1.2fr) minmax(300px, 1fr);
+    gap: 2.25rem;
+    align-items: start;
+}
+
+.location-heading,
+.facade-heading {
+    width: fit-content;
+    padding: 0.55rem 0.85rem;
+    color: #ffffff !important;
+    background: transparent;
+    border-radius: 6px;
+    margin: 0 0 1rem;
+    font-size: 1.15rem;
+}
+
+.location-facade-content > * {
+    min-width: 0;
+}
+
+.location-heading {
+    grid-column: 1;
+}
+
+.map-container {
+    grid-column: 1;
+}
+
+.facade-heading {
+    grid-column: 2;
+    grid-row: 1;
+}
+
+.facade-grid {
+    grid-column: 2;
+    grid-row: 2;
     display: grid;
     grid-template-columns: repeat(2, minmax(180px, 1fr));
-    gap: 0.75rem;
+    gap: 1rem;
     justify-content: center;
     align-items: stretch;
     max-width: 620px;
     margin: 0 auto;
 }
 
-.facade-section .facade-card {
-    background: transparent;
-    border-radius: 20px;
-    width: 25%;
-    height: 50px;
-    min-height: 50px;
-    max-height: 50px;
+.facade-card {
+    display: block;
+    background: var(--white);
+    border-radius: 14px;
+    width: 100%;
+    height: 380px;
     box-shadow: 0 16px 28px rgba(15, 23, 42, 0.12);
     overflow: hidden;
     border: 1px solid rgba(15, 23, 42, 0.08);
 }
 
-.facade-section .facade-card-image {
-    width: 30%;
-    height: 30%;
+.facade-card-image {
+    width: 100%;
+    height: 100%;
     overflow: hidden;
     display: flex;
     align-items: center;
@@ -776,34 +839,48 @@ section h2::after {
     background: #f8fafc;
 }
 
-.facade-section .facade-image {
-    width: 30%;
-    height: 30%;
+.facade-image {
+    width: 100%;
+    max-width: 100%;
+    height: 100%;
     object-fit: cover;
     display: block;
     border-radius: 0;
-}
-
-@media (max-width: 760px) {
-    .facade-grid {
-        grid-template-columns: 1fr;
-        max-width: 100%;
-    }
 }
 
 @media (max-width: 900px) {
-    .facade-grid {
+    .location-facade-content {
         grid-template-columns: 1fr;
+    }
+
+    .facade-grid {
+        grid-column: 1;
+        grid-row: auto;
+        grid-template-columns: repeat(2, minmax(0, 1fr));
         gap: 1rem;
+        max-width: 620px;
     }
 }
 
-.facade-image {
-    width: 20%;
-    height: 20%;
-    object-fit: cover;
-    display: block;
-    border-radius: 0;
+@media (max-width: 560px) {
+    .location-facade-layout {
+        padding: 1.25rem;
+    }
+
+    .facade-heading {
+        grid-column: 1;
+        grid-row: auto;
+    }
+
+    .facade-grid {
+        grid-template-columns: 1fr;
+    }
+}
+
+@media (max-width: 768px) {
+    .facade-card {
+        height: 300px;
+    }
 }
 
 /* ========== ROOMS/FACILITIES SECTION ========== */
@@ -875,6 +952,20 @@ section h2::after {
     border-radius: 20px;
     font-size: 0.8rem;
     font-weight: 600;
+}
+
+.pool-maintenance-badge {
+    position: absolute;
+    top: 10px;
+    right: 10px;
+    background: #ef4444;
+    color: #ffffff;
+    padding: 0.5rem 1rem;
+    border-radius: 20px;
+    font-weight: 600;
+    font-size: 0.85rem;
+    box-shadow: 0 2px 8px rgba(239, 68, 68, 0.3);
+    z-index: 10;
 }
 
 .facility-info {
@@ -1104,24 +1195,24 @@ section h2::after {
 
 /* ========== FOOTER ========== */
 .footer {
-    background: #142a6d;
+    background: #2F58AD;
     color: #ffffff;
-    padding: 3rem 0 2rem;
-    margin-top: 4rem;
+    padding: 2rem 0 1.25rem;
+    margin-top: 0;
 }
 
 .footer-content {
     display: grid;
     grid-template-columns: repeat(3, minmax(220px, 1fr));
-    gap: 2rem;
-    margin-bottom: 2rem;
+    gap: 1.5rem;
+    margin-bottom: 1.25rem;
     align-items: start;
 }
 
 .footer-section h3 {
-    margin-bottom: 1rem;
+    margin-bottom: 0.7rem;
     color: #f97316;
-    font-size: 1.2rem;
+    font-size: 1.05rem;
     letter-spacing: 0.02em;
 }
 
@@ -1147,32 +1238,59 @@ section h2::after {
 
 .footer-section p {
     color: rgba(255, 255, 255, 0.85);
-    line-height: 1.8;
-    margin-bottom: 0.75rem;
+    line-height: 1.55;
+    margin-bottom: 0.45rem;
 }
 
 .social-icons {
     display: flex;
-    gap: 1rem;
-    margin-top: 0.5rem;
+    gap: 0.75rem;
+    margin-top: 0.35rem;
 }
 
 .social-icons a {
     display: inline-flex;
     align-items: center;
     justify-content: center;
-    width: 44px;
-    height: 44px;
+    width: 38px;
+    height: 38px;
     background-color: rgba(255, 255, 255, 0.08);
     border-radius: 50%;
-    font-size: 1.1rem;
+    font-size: 1rem;
     color: #ffffff;
     transition: background-color 0.3s ease, transform 0.3s ease;
 }
 
+.social-icons .social-facebook {
+    background-color: rgba(255, 255, 255, 0.2);
+    color: #1877f2;
+}
+
+.social-icons .social-instagram {
+    background: rgba(255, 255, 255, 0.2);
+    color: #e4405f;
+}
+
+.social-icons .social-tiktok {
+    background-color: rgba(255, 255, 255, 0.2);
+    color: #000000;
+}
+
 .social-icons a:hover {
-    background-color: rgba(249, 115, 24, 0.18);
+    background: #ffffff;
     transform: translateY(-2px);
+}
+
+.social-icons .social-facebook:hover {
+    color: #1877f2;
+}
+
+.social-icons .social-instagram:hover {
+    color: #e4405f;
+}
+
+.social-icons .social-tiktok:hover {
+    color: #000000;
 }
 
 .footer-bottom {

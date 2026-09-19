@@ -148,8 +148,8 @@ class BookingController {
     /**
      * Check daily availability for all rooms
      */
-    public function checkDailyAvailability($date) {
-        return $this->booking->checkDailyAvailability($date);
+    public function checkDailyAvailability($date, $tourType = 'day') {
+        return $this->booking->checkDailyAvailability($date, null, $tourType);
     }
     
     /**

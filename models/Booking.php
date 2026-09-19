@@ -231,15 +231,33 @@ class Booking {
     /**
      * Check daily availability for rooms and cottages
      */
-    public function checkDailyAvailability($date, $roomName = null) {
-        // Load limits from reservation_limits table
-        $rows = $this->db->getRows("SELECT item_name, daily_limit FROM reservation_limits");
+    public function checkDailyAvailability($date, $roomName = null, $tourType = 'day') {
+        $tourType = strtolower((string)$tourType) === 'night' ? 'night' : 'day';
+        // Load independent limits for the selected tour.
         $itemLimits = [];
-        foreach ($rows as $r) {
-            $itemLimits[$r['item_name']] = (int)$r['daily_limit'];
+        $slotColumn = $tourType === 'night' ? 'night_slots' : 'day_slots';
+
+        // Get rooms with their daily_slots
+        try {
+            $rooms = $this->db->getRows("SELECT name, {$slotColumn} AS tour_slots FROM rooms WHERE archived = 0");
+            foreach ($rooms as $room) {
+                $itemLimits[$room['name']] = (int)($room['tour_slots'] ?? 1);
+            }
+        } catch (Exception $e) {
+            // Query failed, use fallback
         }
 
-        // Fallback to centralized config if DB has no entries
+        // Get cottages with their daily_slots
+        try {
+            $cottages = $this->db->getRows("SELECT name, {$slotColumn} AS tour_slots FROM cottages WHERE archived = 0");
+            foreach ($cottages as $cottage) {
+                $itemLimits[$cottage['name']] = (int)($cottage['tour_slots'] ?? 1);
+            }
+        } catch (Exception $e) {
+            // Query failed, use fallback
+        }
+
+        // Fallback to centralized config if no data found
         if (empty($itemLimits)) {
             $itemLimits = getAllReservationLimits();
         }
@@ -251,12 +269,15 @@ class Booking {
                 FROM reservation_items ri
                 JOIN reservations r ON ri.reservation_id = r.id
                 WHERE r.status IN ('pending', 'approved')
-                  AND ? >= r.check_in
-                  AND ? < r.check_out
+                                    AND COALESCE(r.tour_type, 'day') = ?
+                  AND (
+                        (r.check_in = r.check_out AND ? = r.check_in)
+                     OR (r.check_in <> r.check_out AND ? >= r.check_in AND ? < r.check_out)
+                  )
                   AND ri.item_name IN ($placeholders)
                 GROUP BY ri.item_name";
 
-        $params = array_merge([$date, $date], $itemNames);
+        $params = array_merge([$tourType, $date, $date, $date], $itemNames);
         $results = $this->db->getRows($sql, $params);
 
         $availability = [];

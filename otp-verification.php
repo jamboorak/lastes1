@@ -12,6 +12,9 @@ if (!isset($_SESSION['google_user_data'])) {
 }
 
 $userEmail = $_SESSION['google_user_data']['email'];
+$otpResendCooldown = (int)(defined('OTP_RESEND_COOLDOWN_SECONDS') ? OTP_RESEND_COOLDOWN_SECONDS : 120);
+$otpExpirySeconds = (int)(defined('OTP_EXPIRY_SECONDS') ? OTP_EXPIRY_SECONDS : 180);
+$otpResendTimerLabel = gmdate('i:s', $otpResendCooldown);
 
 // Automatically send OTP when page loads
 require_once 'config/database.php';
@@ -24,8 +27,8 @@ try {
     // Generate 6-digit OTP
     $otpCode = str_pad(random_int(0, 999999), 6, '0', STR_PAD_LEFT);
     
-    // Set expiry time (5 minutes from now)
-    $expiresAt = date('Y-m-d H:i:s', strtotime('+5 minutes'));
+    // Set expiry time (3 minutes from now)
+    $expiresAt = date('Y-m-d H:i:s', time() + $otpExpirySeconds);
     
     // Store user data as JSON
     $userDataJson = json_encode($_SESSION['google_user_data']);
@@ -92,7 +95,7 @@ function sendOTPEmail($toEmail, $otpCode, $userName) {
                     <div style='background: white; border: 2px solid #667eea; border-radius: 10px; padding: 20px; text-align: center; margin: 20px 0;'>
                         <span style='font-size: 36px; font-weight: bold; color: #667eea; letter-spacing: 5px;'>{$otpCode}</span>
                     </div>
-                    <p style='font-size: 14px; color: #666; margin-bottom: 10px;'>This OTP will expire in <strong>5 minutes</strong>.</p>
+                    <p style='font-size: 14px; color: #666; margin-bottom: 10px;'>This OTP will expire in <strong>3 minutes</strong>.</p>
                     <p style='font-size: 14px; color: #666; margin-bottom: 20px;'>If you did not request this verification, please ignore this email.</p>
                     <hr style='border: none; border-top: 1px solid #ddd; margin: 20px 0;'>
                     <p style='font-size: 12px; color: #999; text-align: center;'>This is an automated email. Please do not reply.</p>
@@ -104,7 +107,7 @@ function sendOTPEmail($toEmail, $otpCode, $userName) {
         ";
         
         $mail->Body = $emailBody;
-        $mail->AltBody = "Your OTP verification code is: {$otpCode}\n\nThis code will expire in 5 minutes.\n\nIf you did not request this verification, please ignore this email.";
+        $mail->AltBody = "Your OTP verification code is: {$otpCode}\n\nThis code will expire in 3 minutes.\n\nIf you did not request this verification, please ignore this email.";
         
         $mail->send();
         return true;
@@ -130,7 +133,7 @@ function sendOTPEmail($toEmail, $otpCode, $userName) {
         }
 
         body {
-            background: #e5e5e5;
+            background: linear-gradient(rgba(15, 23, 42, 0.8), rgba(15, 23, 42, 0.9)), url('images/villasoledadbg.png') center/cover no-repeat;
             height: 100vh;
             display: flex;
             justify-content: center;
@@ -150,7 +153,7 @@ function sendOTPEmail($toEmail, $otpCode, $userName) {
         .left {
             width: 50%;
             position: relative;
-            background: url('https://images.unsplash.com/photo-1582719478250-c89cae4dc85b') no-repeat center/cover;
+            background: url('images/villasoledadbg.png') no-repeat center/cover;
             color: white;
             padding: 20px;
         }
@@ -158,7 +161,7 @@ function sendOTPEmail($toEmail, $otpCode, $userName) {
         .overlay {
             position: absolute;
             inset: 0;
-            background: rgba(0,0,0,0.4);
+            background: rgba(15, 23, 42, 0.6);
         }
 
         .left-content {
@@ -187,30 +190,30 @@ function sendOTPEmail($toEmail, $otpCode, $userName) {
         .right {
             width: 50%;
             padding: 40px;
-            background: #f9f9f9;
+            background: #ffffff;
             display: flex;
             flex-direction: column;
             justify-content: center;
-            border-left: 2px solid #ccc;
+            border-left: 2px solid rgba(249, 115, 22, 0.2);
         }
 
         .right h2 {
             text-align: center;
             margin-bottom: 30px;
-            color: #1c355e;
+            color: #1e3a8a;
             font-size: 28px;
         }
 
         .email-text {
             text-align: center;
-            color: #666;
+            color: #475569;
             font-size: 14px;
             margin-bottom: 25px;
             line-height: 1.5;
         }
 
         .email-text strong {
-            color: #1c355e;
+            color: #1e3a8a;
             font-weight: bold;
         }
 
@@ -224,7 +227,7 @@ function sendOTPEmail($toEmail, $otpCode, $userName) {
         .otp-input {
             width: 50px;
             height: 55px;
-            border: 1px solid #bbb;
+            border: 1px solid #e5e7eb;
             border-radius: 8px;
             font-size: 24px;
             font-weight: 600;
@@ -234,18 +237,21 @@ function sendOTPEmail($toEmail, $otpCode, $userName) {
         }
 
         .otp-input:focus {
-            border-color: #1c355e;
+            border-color: #f97316;
+            box-shadow: 0 0 0 3px rgba(249, 115, 22, 0.1);
         }
 
         .otp-input.has-error {
-            border-color: #ff4757;
+            border-color: #ef4444;
             animation: shake 0.5s;
         }
 
         @keyframes shake {
             0%, 100% { transform: translateX(0); }
-            25% { transform: translateX(-5px); }
-            75% { transform: translateX(5px); }
+            20% { transform: translateX(-5px); }
+            40% { transform: translateX(5px); }
+            60% { transform: translateX(-5px); }
+            80% { transform: translateX(5px); }
         }
 
         .verify-btn {
@@ -253,7 +259,7 @@ function sendOTPEmail($toEmail, $otpCode, $userName) {
             padding: 12px;
             border: none;
             border-radius: 25px;
-            background: orange;
+            background: #f97316;
             color: white;
             font-weight: bold;
             cursor: pointer;
@@ -263,19 +269,21 @@ function sendOTPEmail($toEmail, $otpCode, $userName) {
         }
 
         .verify-btn:hover {
-            background: darkorange;
+            background: #ea580c;
             transform: translateY(-2px);
-            box-shadow: 0 5px 15px rgba(255, 165, 0, 0.3);
+            box-shadow: 0 5px 15px rgba(249, 115, 22, 0.4);
         }
 
         .verify-btn:active {
             transform: translateY(0);
+            background: #c2410c;
         }
 
         .verify-btn:disabled {
             opacity: 0.6;
             cursor: not-allowed;
             transform: none;
+            background: #f97316;
         }
 
         .resend-text {
@@ -286,7 +294,7 @@ function sendOTPEmail($toEmail, $otpCode, $userName) {
         }
 
         .resend-link {
-            color: #1c355e;
+            color: #f97316;
             text-decoration: none;
             font-weight: bold;
             cursor: pointer;
@@ -302,8 +310,31 @@ function sendOTPEmail($toEmail, $otpCode, $userName) {
             pointer-events: none;
         }
 
+        .resend-loading {
+            display: inline-flex;
+            align-items: center;
+            justify-content: center;
+            gap: 0.5rem;
+            color: #f97316;
+            font-weight: 600;
+            cursor: wait;
+            pointer-events: none;
+            text-decoration: none;
+        }
+
+        .resend-spinner {
+            display: inline-block;
+            width: 14px;
+            height: 14px;
+            border: 2px solid rgba(249, 115, 22, 0.2);
+            border-radius: 50%;
+            border-top-color: #f97316;
+            animation: spin 0.8s linear infinite;
+            flex-shrink: 0;
+        }
+
         .error-message {
-            color: #ff4757;
+            color: #ef4444;
             font-size: 12px;
             margin-top: 15px;
             text-align: center;
@@ -311,7 +342,7 @@ function sendOTPEmail($toEmail, $otpCode, $userName) {
         }
 
         .success-message {
-            color: #2ed573;
+            color: #10b981;
             font-size: 12px;
             margin-top: 15px;
             text-align: center;
@@ -327,6 +358,20 @@ function sendOTPEmail($toEmail, $otpCode, $userName) {
             border-top-color: white;
             animation: spin 1s ease-in-out infinite;
             margin-right: 10px;
+            vertical-align: middle;
+        }
+
+        .loading-resend {
+            display: none;
+        }
+
+        .loading-orange {
+            border: 3px solid rgba(249, 115, 22, 0.2);
+            border-top-color: #f97316;
+        }
+
+        .loading-resend {
+            display: none;
         }
 
         @keyframes spin {
@@ -420,7 +465,7 @@ function sendOTPEmail($toEmail, $otpCode, $userName) {
 
             <p class="resend-text">
                 Didn't receive the code? 
-                <span class="resend-link disabled" id="resendLink">Resend OTP in <span id="timer">05:00</span></span>
+                <span class="resend-link disabled" id="resendLink">Resend OTP in <span id="timer"><?php echo htmlspecialchars($otpResendTimerLabel); ?></span></span>
             </p>
 
             <div class="error-message" id="errorMessage"></div>
@@ -438,7 +483,7 @@ function sendOTPEmail($toEmail, $otpCode, $userName) {
             const errorMessage = document.getElementById('errorMessage');
             const successMessage = document.getElementById('successMessage');
 
-            let timeLeft = 300; // 5 minutes in seconds
+            let timeLeft = <?php echo (int)$otpResendCooldown; ?>;
             let timerInterval;
 
             // Auto-focus first input
@@ -492,17 +537,40 @@ function sendOTPEmail($toEmail, $otpCode, $userName) {
                     
                             if (timeLeft <= 0) {
                         clearInterval(timerInterval);
-                        resendLink.classList.remove('disabled');
-                        resendLink.textContent = 'Resend OTP';
+                        if (!resendLink.classList.contains('resend-loading')) {
+                            resendLink.className = 'resend-link';
+                            resendLink.textContent = 'Resend OTP';
+                        }
                     }
                 }, 1000);
             }
 
             startTimer();
 
+            function setResendLoading(isLoading) {
+                if (isLoading) {
+                    resendLink.classList.remove('disabled');
+                    resendLink.className = 'resend-loading';
+                    resendLink.innerHTML = '<span class="resend-spinner" aria-hidden="true"></span><span>Resending...</span>';
+                    return;
+                }
+
+                resendLink.className = 'resend-link disabled';
+                resendLink.textContent = 'Resend OTP in ';
+                const newTimer = document.createElement('span');
+                newTimer.id = 'timer';
+                newTimer.textContent = '<?php echo htmlspecialchars($otpResendTimerLabel); ?>';
+                resendLink.appendChild(newTimer);
+                timerDisplay = newTimer;
+            }
+
             // Resend OTP
             resendLink.addEventListener('click', function() {
-                if (this.classList.contains('disabled')) return;
+                if (this.classList.contains('disabled') || this.classList.contains('resend-loading')) return;
+
+                setResendLoading(true);
+                errorMessage.style.display = 'none';
+                successMessage.style.display = 'none';
 
                 fetch('api/send_otp.php', {
                     method: 'POST',
@@ -517,14 +585,8 @@ function sendOTPEmail($toEmail, $otpCode, $userName) {
                 .then(data => {
                     if (data.success) {
                         // Reset timer
-                        timeLeft = 300;
-                        resendLink.classList.add('disabled');
-                        resendLink.textContent = 'Resend OTP in ';
-                        const newTimer = document.createElement('span');
-                        newTimer.id = 'timer';
-                        newTimer.textContent = '05:00';
-                        resendLink.appendChild(newTimer);
-                        timerDisplay = newTimer;
+                        timeLeft = <?php echo (int)$otpResendCooldown; ?>;
+                        setResendLoading(false);
                         startTimer();
                         
                         // Clear inputs
@@ -533,10 +595,14 @@ function sendOTPEmail($toEmail, $otpCode, $userName) {
                         
                         showSuccess('New OTP sent successfully!');
                     } else {
+                        resendLink.className = 'resend-link';
+                        resendLink.textContent = 'Resend OTP';
                         showError(data.message || 'Failed to resend OTP');
                     }
                 })
                 .catch(error => {
+                    resendLink.className = 'resend-link';
+                    resendLink.textContent = 'Resend OTP';
                     showError('An error occurred. Please try again.');
                 });
             });

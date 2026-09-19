@@ -5,6 +5,7 @@
 
 require_once __DIR__ . '/../config/config.php';
 require_once __DIR__ . '/../config/database.php';
+require_once __DIR__ . '/../includes/ActivityLogger.php';
 
 if (session_status() === PHP_SESSION_NONE) {
     session_start();
@@ -88,6 +89,7 @@ class User {
         $_SESSION['user_email'] = $user['email'];
         $_SESSION['logged_in'] = true;
         $_SESSION['login_time'] = time();
+        logUserActivity($this->db->getConnection(), $user['id'], 'login', 'User logged in with password');
         
         return ['success' => true, 'message' => 'Login successful', 'user' => $user];
     }
@@ -96,6 +98,10 @@ class User {
      * Logout user
      */
     public function logout() {
+        $userId = $_SESSION['user_id'] ?? null;
+        if ($userId) {
+            logUserActivity($this->db->getConnection(), $userId, 'logout', 'User logged out');
+        }
         // Unset all session variables
         $_SESSION = [];
         
@@ -124,8 +130,25 @@ class User {
         }
         
         $userId = $_SESSION['user_id'];
-        $sql = "SELECT id, fullname, email, phone, created_at FROM users WHERE id = ?";
+        $sql = "SELECT id, fullname, email, phone, phone_verified, avatar, created_at FROM users WHERE id = ?";
         return $this->db->getRow($sql, [$userId]);
+    }
+
+    /**
+     * Save a user's profile avatar URL.
+     */
+    public function updateAvatar($userId, $avatarUrl) {
+        if (empty($userId) || empty($avatarUrl)) {
+            return ['success' => false, 'message' => 'A profile image is required'];
+        }
+
+        $affected = $this->db->update('UPDATE users SET avatar = ? WHERE id = ?', [$avatarUrl, $userId]);
+        if ($affected > 0) {
+            $_SESSION['user_avatar'] = $avatarUrl;
+            return ['success' => true, 'message' => 'Profile image updated successfully'];
+        }
+
+        return ['success' => false, 'message' => 'Unable to update profile image'];
     }
     
     /**

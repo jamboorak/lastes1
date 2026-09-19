@@ -26,7 +26,7 @@ if (isset($_SESSION['admin_logged_in']) && $_SESSION['admin_logged_in'] === true
         }
 
         body {
-            background: linear-gradient(135deg, var(--primary-blue) 0%, var(--light-blue) 100%);
+            background: linear-gradient(rgba(10, 35, 58, 0.72), rgba(10, 35, 58, 0.72)), url('../images/villasoledadbg.png') center / cover fixed;
             font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
             display: flex;
             align-items: center;
@@ -93,6 +93,32 @@ if (isset($_SESSION['admin_logged_in']) && $_SESSION['admin_logged_in'] === true
             border-color: var(--accent-orange);
             background: white;
             box-shadow: 0 0 0 3px rgba(249, 115, 22, 0.12);
+        }
+
+        .password-input-wrapper {
+            position: relative;
+        }
+
+        .password-input-wrapper input {
+            padding-right: 3rem;
+        }
+
+        .password-toggle {
+            position: absolute;
+            top: 50%;
+            right: 0.75rem;
+            transform: translateY(-50%);
+            border: 0;
+            background: transparent;
+            color: #6b7280;
+            cursor: pointer;
+            font-size: 1rem;
+            padding: 0.35rem;
+        }
+
+        .password-toggle:hover,
+        .password-toggle:focus {
+            color: var(--accent-orange);
         }
 
         .form-group input::placeholder {
@@ -173,13 +199,18 @@ if (isset($_SESSION['admin_logged_in']) && $_SESSION['admin_logged_in'] === true
 
             <form action="process_admin_login.php" method="POST">
                 <div class="form-group">
-                    <label for="email">Email Address</label>
-                    <input type="email" id="email" name="email" placeholder="admin@example.com" required>
+                    <label for="login_identifier">Email or Username</label>
+                    <input type="text" id="login_identifier" name="login_identifier" placeholder="Enter email or username" autocomplete="username" required>
                 </div>
 
                 <div class="form-group">
                     <label for="password">Password</label>
-                    <input type="password" id="password" name="password" placeholder="Enter your password" required>
+                    <div class="password-input-wrapper">
+                        <input type="password" id="password" name="password" placeholder="Enter your password" autocomplete="current-password" required>
+                        <button type="button" class="password-toggle" onclick="togglePasswordVisibility('password', this)" aria-label="Show password" title="Show password">
+                            <i class="fas fa-eye" aria-hidden="true"></i>
+                        </button>
+                    </div>
                 </div>
 
                 <button type="submit" class="login-btn">
@@ -194,5 +225,19 @@ if (isset($_SESSION['admin_logged_in']) && $_SESSION['admin_logged_in'] === true
             </div>
         </div>
     </div>
+
+    <script>
+        function togglePasswordVisibility(inputId, button) {
+            const input = document.getElementById(inputId);
+            const icon = button.querySelector('i');
+            const isPassword = input.type === 'password';
+
+            input.type = isPassword ? 'text' : 'password';
+            icon.classList.toggle('fa-eye', !isPassword);
+            icon.classList.toggle('fa-eye-slash', isPassword);
+            button.setAttribute('aria-label', isPassword ? 'Hide password' : 'Show password');
+            button.setAttribute('title', isPassword ? 'Hide password' : 'Show password');
+        }
+    </script>
 </body>
 </html>

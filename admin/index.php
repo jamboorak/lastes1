@@ -42,11 +42,10 @@ $cancelledReservations = $conn->query("SELECT COUNT(*) as count FROM reservation
 // Get recent reservations
 $recentReservations = $conn->query("
     SELECT r.*, 
-           COALESCE(u.fullname, ua.fullname, 'Unknown') as user_name,
-           COALESCE(u.email, ua.email, '') as user_email
+           COALESCE(u.fullname, 'Unknown') as user_name,
+           COALESCE(u.email, '') as user_email
     FROM reservations r 
     LEFT JOIN users u ON r.user_id = u.id
-    LEFT JOIN user_accounts ua ON r.user_id = ua.id
     ORDER BY r.created_at DESC 
     LIMIT 5
 ")->fetch_all(MYSQLI_ASSOC);
@@ -546,7 +545,7 @@ $recentReservations = $conn->query("
                         <button onclick="openDateModal()" style="background: var(--primary-blue); color: white; border: none; padding: 0.75rem 1.5rem; border-radius: 8px; cursor: pointer; font-weight: 600; display: flex; align-items: center; gap: 0.5rem;">
                             <i class="fas fa-calendar"></i> Check Availability
                         </button>
-                        <button onclick="window.location.href='../views/rooms.php'" style="background: var(--accent-orange); color: white; border: none; padding: 0.75rem 1.5rem; border-radius: 8px; cursor: pointer; font-weight: 600;">
+                        <button onclick="window.location.href='<?php echo SITE_URL; ?>rooms.php'" style="background: var(--accent-orange); color: white; border: none; padding: 0.75rem 1.5rem; border-radius: 8px; cursor: pointer; font-weight: 600;">
                             <i class="fas fa-plus"></i> Add Room
                         </button>
                     </div>
@@ -652,7 +651,7 @@ $recentReservations = $conn->query("
                         <button onclick="openDateModal()" style="background: var(--primary-blue); color: white; border: none; padding: 0.75rem 1.5rem; border-radius: 8px; cursor: pointer; font-weight: 600; display: flex; align-items: center; gap: 0.5rem;">
                             <i class="fas fa-calendar"></i> Check Availability
                         </button>
-                        <button onclick="window.location.href='../views/cottages.php'" style="background: var(--accent-orange); color: white; border: none; padding: 0.75rem 1.5rem; border-radius: 8px; cursor: pointer; font-weight: 600;">
+                        <button onclick="window.location.href='<?php echo SITE_URL; ?>cottages.php'" style="background: var(--accent-orange); color: white; border: none; padding: 0.75rem 1.5rem; border-radius: 8px; cursor: pointer; font-weight: 600;">
                             <i class="fas fa-plus"></i> Add Cottage
                         </button>
                     </div>

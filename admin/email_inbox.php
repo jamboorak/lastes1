@@ -12,7 +12,7 @@ echo "<hr>";
 
 if (!is_dir($emailDir)) {
     echo "<p>No emails have been generated yet. Approve or cancel a reservation to generate an email.</p>";
-    echo "<p><a href='reservations.php'>← Go to Reservations</a></p>";
+    echo "<p><a href='dashboard.php?section=reservations'>← Go to Reservations</a></p>";
     exit;
 }
 
@@ -20,7 +20,7 @@ $files = array_diff(scandir($emailDir, SCANDIR_SORT_DESCENDING), ['.', '..']);
 
 if (empty($files)) {
     echo "<p>No emails have been generated yet.</p>";
-    echo "<p><a href='reservations.php'>← Go to Reservations</a></p>";
+    echo "<p><a href='dashboard.php?section=reservations'>← Go to Reservations</a></p>";
     exit;
 }
 
@@ -211,7 +211,7 @@ if (empty($files)) {
         </div>
         
         <p style="margin-top: 20px;">
-            <a href="reservations.php" style="padding: 10px 20px; background: #1e3a8a; color: white; border-radius: 4px; text-decoration: none;">← Back to Reservations</a>
+            <a href="dashboard.php?section=reservations" style="padding: 10px 20px; background: #1e3a8a; color: white; border-radius: 4px; text-decoration: none;">← Back to Reservations</a>
         </p>
     </div>
 

@@ -2,6 +2,7 @@
 require_once '../config/database.php';
 require_once '../config/config.php';
 require_once '../includes/EmailService.php';
+require_once '../includes/guest_info_schema.php';
 
 header('Content-Type: application/json');
 
@@ -21,6 +22,7 @@ if (!isset($data['reservation_id']) || !isset($data['status'])) {
 
 $reservationId = (int)$data['reservation_id'];
 $status = trim($data['status']);
+$cancellationReason = trim((string)($data['cancellation_reason'] ?? ''));
 
 // Validate status
 $validStatuses = ['pending', 'approved', 'cancelled', 'completed'];
@@ -29,16 +31,33 @@ if (!in_array($status, $validStatuses)) {
     exit;
 }
 
+if ($status === 'cancelled' && strlen($cancellationReason) < 5) {
+    http_response_code(400);
+    echo json_encode(['success' => false, 'message' => 'Cancellation reason is required (at least 5 characters).']);
+    exit;
+}
+
 try {
     $db = new Database();
     $conn = $db->getConnection();
+    ensureGuestInfoSchema($conn);
+
+    // Ensure cancellation_reason column exists
+    $colCheck = $conn->query("SHOW COLUMNS FROM reservations LIKE 'cancellation_reason'");
+    if ($colCheck && $colCheck->num_rows === 0) {
+        $conn->query("ALTER TABLE reservations ADD COLUMN cancellation_reason TEXT NULL AFTER status");
+    }
+
+    $guestNameExpr = guestDisplayNameSql('gi', 'u');
     
-    // Get reservation details and user email
+    // Get reservation details (prefer lead guest contact over account)
     $query = "SELECT r.id, r.user_id, r.check_in, r.check_out, r.total_amount, r.status,
-                     u.email, u.fullname, 
+                     COALESCE(NULLIF(gi.email, ''), u.email, '') as email,
+                     {$guestNameExpr} as fullname,
                      GROUP_CONCAT(CONCAT(ri.item_name, ' (', ri.item_type, ')') SEPARATOR ', ') as items
               FROM reservations r
               LEFT JOIN users u ON r.user_id = u.id
+              LEFT JOIN guest_info gi ON r.guest_info_id = gi.id
               LEFT JOIN reservation_items ri ON r.id = ri.reservation_id
               WHERE r.id = ?
               GROUP BY r.id";
@@ -59,19 +78,31 @@ try {
         exit;
     }
     
-    // Update reservation status
-    $updateQuery = "UPDATE reservations SET status = ?, updated_at = NOW() WHERE id = ?";
-    $updateStmt = $conn->prepare($updateQuery);
-    if (!$updateStmt) {
-        echo json_encode(['success' => false, 'message' => 'Database error: ' . $conn->error]);
-        exit;
+    // Update reservation status (and reason when cancelling)
+    if ($status === 'cancelled') {
+        $updateQuery = "UPDATE reservations SET status = ?, cancellation_reason = ?, updated_at = NOW() WHERE id = ?";
+        $updateStmt = $conn->prepare($updateQuery);
+        if (!$updateStmt) {
+            echo json_encode(['success' => false, 'message' => 'Database error: ' . $conn->error]);
+            exit;
+        }
+        $updateStmt->bind_param('ssi', $status, $cancellationReason, $reservationId);
+    } else {
+        $updateQuery = "UPDATE reservations SET status = ?, updated_at = NOW() WHERE id = ?";
+        $updateStmt = $conn->prepare($updateQuery);
+        if (!$updateStmt) {
+            echo json_encode(['success' => false, 'message' => 'Database error: ' . $conn->error]);
+            exit;
+        }
+        $updateStmt->bind_param('si', $status, $reservationId);
     }
-    
-    $updateStmt->bind_param('si', $status, $reservationId);
+
     if (!$updateStmt->execute()) {
         echo json_encode(['success' => false, 'message' => 'Failed to update reservation']);
         exit;
     }
+
+    $reservation['cancellation_reason'] = $cancellationReason;
     
     // Send email notification based on status change
     if ($status === 'approved' && !empty($reservation['email'])) {
@@ -79,8 +110,14 @@ try {
     } elseif ($status === 'cancelled' && !empty($reservation['email'])) {
         sendCancellationEmail($reservation);
     }
+
+    $message = $status === 'approved'
+        ? 'Reservation approved successfully. The guest has been notified.'
+        : ($status === 'cancelled'
+            ? 'Reservation cancelled successfully. The guest has been notified with the reason.'
+            : 'Reservation status updated successfully');
     
-    echo json_encode(['success' => true, 'message' => 'Reservation status updated successfully']);
+    echo json_encode(['success' => true, 'message' => $message]);
     
 } catch (Exception $e) {
     http_response_code(500);
@@ -116,7 +153,6 @@ function sendApprovalEmail($reservation) {
         .detail-label { font-weight: bold; color: #1e3a8a; }
         .detail-value { color: #333; }
         .amount { font-size: 1.3em; font-weight: bold; color: #ff8a3d; }
-        .button { display: inline-block; background: #1e3a8a; color: white; padding: 12px 25px; border-radius: 5px; text-decoration: none; margin-top: 15px; font-weight: bold; }
         .footer { text-align: center; color: #999; font-size: 0.9em; margin-top: 20px; padding-top: 20px; border-top: 1px solid #ddd; }
     </style>
 </head>
@@ -198,6 +234,7 @@ function sendCancellationEmail($reservation) {
     $guestName = htmlspecialchars($reservation['fullname'] ?? 'Guest');
     $guestEmail = htmlspecialchars($reservation['email']);
     $reservationId = $reservation['id'];
+    $reason = htmlspecialchars(trim((string)($reservation['cancellation_reason'] ?? '')));
     
     error_log("📧 Attempting to send cancellation email for Reservation #$reservationId to: $guestEmail");
     $checkIn = date('F d, Y', strtotime($reservation['check_in']));
@@ -205,7 +242,14 @@ function sendCancellationEmail($reservation) {
     $items = htmlspecialchars($reservation['items'] ?? 'N/A');
     $totalAmount = number_format((float)$reservation['total_amount'], 2);
     
-$subject = "Reservation Cancelled - Villa Soledad Garden Resort #" . $reservationId;
+    $subject = "Reservation Cancelled - Villa Soledad Garden Resort #" . $reservationId;
+
+    $reasonBlock = $reason !== ''
+        ? "<div class='detail-row' style='display:block; margin-top:12px;'>
+                <span class='detail-label'>Reason for Cancellation:</span>
+                <p style='margin:8px 0 0 0; color:#333;'>" . nl2br($reason) . "</p>
+           </div>"
+        : '';
     
     $message = "<!DOCTYPE html>
 <html>
@@ -220,7 +264,6 @@ $subject = "Reservation Cancelled - Villa Soledad Garden Resort #" . $reservatio
         .detail-label { font-weight: bold; color: #d32f2f; }
         .detail-value { color: #333; }
         .amount { font-size: 1.3em; font-weight: bold; color: #d32f2f; }
-        .button { display: inline-block; background: #1e3a8a; color: white; padding: 12px 25px; border-radius: 5px; text-decoration: none; margin-top: 15px; font-weight: bold; }
         .footer { text-align: center; color: #999; font-size: 0.9em; margin-top: 20px; padding-top: 20px; border-top: 1px solid #ddd; }
     </style>
 </head>
@@ -262,6 +305,7 @@ $subject = "Reservation Cancelled - Villa Soledad Garden Resort #" . $reservatio
                     <span class='detail-label'>Reservation Amount:</span>
                     <span class='detail-value amount'>₱" . $totalAmount . "</span>
                 </div>
+                {$reasonBlock}
             </div>
             
             <p>If you have any questions regarding this cancellation or would like to make a new reservation, please feel free to contact us:</p>
@@ -292,4 +336,3 @@ $subject = "Reservation Cancelled - Villa Soledad Garden Resort #" . $reservatio
         error_log("⚠️  Cancellation email saved to file for Reservation #$reservationId - " . $emailResult['message']);
     }
 }
-?>

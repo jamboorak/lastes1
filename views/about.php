@@ -1,6 +1,6 @@
 <?php
 session_start();
-require_once '../config/config.php';
+require_once __DIR__ . '/../config/config.php';
 
 $isLoggedIn = isset($_SESSION['user_id']);
 $userName = $isLoggedIn ? $_SESSION['user_name'] : '';
@@ -11,7 +11,7 @@ $userName = $isLoggedIn ? $_SESSION['user_name'] : '';
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>About Us - Villa Soledad</title>
-    <link rel="stylesheet" href="../css/style.css">
+    <link rel="stylesheet" href="<?php echo SITE_URL; ?>css/style.css">
     <link href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.0.0/css/all.min.css" rel="stylesheet">
     <style>
         .about-hero {
@@ -145,21 +145,21 @@ $userName = $isLoggedIn ? $_SESSION['user_name'] : '';
     <header class="header">
         <div class="container">
             <div class="nav">
-                <a href="../index.php" class="logo">
+                <a href="<?php echo SITE_URL; ?>index.php" class="logo">
                     <i class="fas fa-hotel"></i>
                     Villa Soledad
                 </a>
                 <nav class="nav-links">
-                    <a href="../index.php">Home</a>
-                    <a href="../index.php#rooms">Rooms</a>
-                    <a href="../index.php#cottages">Cottages</a>
-                    <a href="../index.php#pools">Pools</a>
+                    <a href="<?php echo SITE_URL; ?>index.php">Home</a>
+                    <a href="<?php echo SITE_URL; ?>index.php#rooms">Rooms</a>
+                    <a href="<?php echo SITE_URL; ?>index.php#cottages">Cottages</a>
+                    <a href="<?php echo SITE_URL; ?>index.php#pools">Pools</a>
                     <?php if ($isLoggedIn): ?>
-                        <a href="dashboard.php" class="btn-profile">
+                        <a href="<?php echo SITE_URL; ?>profile.php" class="btn-profile">
                             <i class="fas fa-user-circle"></i> <?php echo htmlspecialchars($userName); ?>
                         </a>
                     <?php else: ?>
-                        <a href="../google-auth.php?action=login" class="btn-profile">
+                        <a href="<?php echo SITE_URL; ?>google-auth.php?action=login" class="btn-profile">
                             <i class="fas fa-user-circle"></i> Login/Sign Up
                         </a>
                     <?php endif; ?>

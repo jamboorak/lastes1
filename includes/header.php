@@ -1,5 +1,6 @@
 <?php
 require_once __DIR__ . '/../config/config.php';
+require_once __DIR__ . '/../config/firebase.php';
 if (session_status() === PHP_SESSION_NONE) {
     session_start();
 }
@@ -7,17 +8,43 @@ require_once __DIR__ . '/../config/database.php';
 require_once __DIR__ . '/../models/User.php';
 require_once __DIR__ . '/../models/Review.php';
 require_once __DIR__ . '/../controllers/ReviewController.php';
+require_once __DIR__ . '/guest_info_schema.php';
 
 $user = new User();
 $reviewController = new ReviewController();
 $currentUser = $user->getCurrentUser();
 $recentReviews = $reviewController->getRecentReviews(3);
 
+// Prefill helpers for lead guest form
+$guestPrefill = $_SESSION['guest_info'] ?? [];
+$guestPrefillFirst = strtoupper($guestPrefill['first_name'] ?? '');
+$guestPrefillLast = strtoupper($guestPrefill['last_name'] ?? '');
+$guestPrefillEmail = $guestPrefill['email'] ?? ($currentUser['email'] ?? '');
+if (!empty($guestPrefill['mobile_number'])) {
+    $storedCode = trim((string)($guestPrefill['mobile_country_code'] ?? ''));
+    $storedNumber = trim((string)($guestPrefill['mobile_number'] ?? ''));
+    $guestPrefillMobile = $storedCode !== '' ? $storedCode . $storedNumber : $storedNumber;
+} else {
+    $guestPrefillMobile = trim((string)($currentUser['phone'] ?? ''));
+}
+    $guestPhoneVerified = false;
+
+if (($guestPrefillFirst === '' || $guestPrefillLast === '') && !empty($currentUser['fullname'])) {
+    $nameParts = preg_split('/\s+/', trim($currentUser['fullname']), 2);
+    if ($guestPrefillFirst === '') {
+        $guestPrefillFirst = $nameParts[0] ?? '';
+    }
+    if ($guestPrefillLast === '') {
+        $guestPrefillLast = $nameParts[1] ?? '';
+    }
+}
+
 // Fetch recent reservations for the user dropdown
 $recentReservations = [];
 if (isset($_SESSION['user_id'])) {
     $db = new Database();
     $conn = $db->getConnection();
+    ensureGuestInfoSchema($conn);
 
     $tablesToEnsure = [
         "CREATE TABLE IF NOT EXISTS reservations (
@@ -77,7 +104,7 @@ if (isset($_SESSION['user_id'])) {
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title><?php echo isset($pageTitle) ? $pageTitle . ' - ' : ''; ?><?php echo SITE_NAME; ?></title>
-    <link rel="stylesheet" href="<?php echo SITE_URL; ?>css/style.css">
+    <link rel="stylesheet" href="<?php echo SITE_URL; ?>css/style.css?v=20260917">
     <link href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.0.0/css/all.min.css" rel="stylesheet">
     <style>
         #loginPopup.login-modal {
@@ -168,9 +195,19 @@ if (isset($_SESSION['user_id'])) {
         }
 
         .social-btn-google {
-            background: #2563eb;
-            color: #ffffff;
-            border: 1px solid transparent;
+            background: #ffffff;
+            color: #1f1f1f;
+            border: 1px solid #747775;
+            font-weight: 500;
+        }
+
+        .social-btn-google:hover {
+            background: #f8f9fa;
+            box-shadow: 0 1px 3px rgba(60, 64, 67, 0.3), 0 1px 2px rgba(60, 64, 67, 0.15);
+        }
+
+        .social-btn-google .google-logo {
+            flex-shrink: 0;
         }
 
         .social-btn-facebook {
@@ -444,7 +481,7 @@ if (isset($_SESSION['user_id'])) {
                     <a href="<?php echo SITE_URL; ?>index.php#pools">Pools</a>
                     <a href="<?php echo SITE_URL; ?>index.php#rooms">Rooms</a>
                     <?php if ($user->isLoggedIn()): ?>
-                        <a href="<?php echo SITE_URL; ?>booking.php">Book Now</a>
+                        <a href="<?php echo SITE_URL; ?>booking.php" id="bookNowNavLink" onclick="return handleBookNowClick(event);">Book Now</a>
                     <?php endif; ?>
                     <a href="<?php echo SITE_URL; ?>food-menu.php">Food Menu</a>
                     
@@ -504,7 +541,12 @@ if (isset($_SESSION['user_id'])) {
             </div>
             <div class="login-popup-buttons">
                 <button type="button" class="social-btn social-btn-google" onclick="window.location.href='<?php echo SITE_URL; ?>google-auth.php'">
-                    <i class="fab fa-google"></i>
+                    <svg class="google-logo" width="18" height="18" viewBox="0 0 48 48" aria-hidden="true">
+                        <path fill="#EA4335" d="M24 9.5c3.54 0 6.71 1.22 9.21 3.6l6.85-6.85C35.9 2.38 30.47 0 24 0 14.62 0 6.51 5.38 2.56 13.22l7.98 6.19C12.43 13.72 17.74 9.5 24 9.5z"/>
+                        <path fill="#4285F4" d="M46.98 24.55c0-1.57-.15-3.09-.38-4.55H24v9.02h12.94c-.58 2.96-2.26 5.48-4.78 7.18l7.73 6c4.51-4.18 7.09-10.36 7.09-17.65z"/>
+                        <path fill="#FBBC05" d="M10.53 28.59c-.48-1.45-.76-2.99-.76-4.59s.27-3.14.76-4.59l-7.98-6.19C.92 16.46 0 20.12 0 24c0 3.88.92 7.54 2.56 10.78l7.97-6.19z"/>
+                        <path fill="#34A853" d="M24 48c6.48 0 11.93-2.13 15.89-5.81l-7.73-6c-2.15 1.45-4.92 2.3-8.16 2.3-6.26 0-11.57-4.22-13.47-9.91l-7.98 6.19C6.51 42.62 14.62 48 24 48z"/>
+                    </svg>
                     Sign in with Google
                 </button>
             </div>
@@ -513,7 +555,390 @@ if (isset($_SESSION['user_id'])) {
         </div>
     </div>
 
+    <?php if ($user->isLoggedIn()): ?>
+    <!-- Lead Guest Info Popup -->
+    <div id="guestInfoPopup" class="guest-info-modal" aria-hidden="true" hidden>
+        <div class="guest-info-modal-content" role="dialog" aria-labelledby="guestInfoTitle">
+            <button type="button" class="guest-info-modal-close" onclick="closeGuestInfoModal()" aria-label="Close">&times;</button>
+            <h2 id="guestInfoTitle">Who's the lead guest?</h2>
+            <p class="guest-info-required">*Required field</p>
+            <form id="guestInfoForm" onsubmit="return submitGuestInfoForm(event);">
+                <div class="guest-info-grid">
+                    <div class="guest-field">
+                        <label for="guestFirstName">First name <span>*</span></label>
+                        <input type="text" id="guestFirstName" name="first_name" required value="<?php echo htmlspecialchars($guestPrefillFirst); ?>" autocomplete="given-name" style="text-transform: uppercase;" oninput="this.value = this.value.toUpperCase()" onblur="this.value = this.value.toUpperCase()">
+                    </div>
+                    <div class="guest-field">
+                        <label for="guestLastName">Last name <span>*</span></label>
+                        <input type="text" id="guestLastName" name="last_name" required value="<?php echo htmlspecialchars($guestPrefillLast); ?>" autocomplete="family-name" style="text-transform: uppercase;" oninput="this.value = this.value.toUpperCase()" onblur="this.value = this.value.toUpperCase()">
+                    </div>
+                    <div class="guest-field">
+                        <label for="guestEmail">Email <span>*</span></label>
+                        <input type="email" id="guestEmail" name="email" required value="<?php echo htmlspecialchars($guestPrefillEmail); ?>" autocomplete="email" readonly>
+                    </div>
+                    <div class="guest-field">
+                        <label for="guestMobileNumber">Mobile number <span>*</span></label>
+                        <div class="guest-mobile-row">
+                            <input type="tel" id="guestMobileNumber" name="mobile_number" required value="<?php echo htmlspecialchars($guestPrefillMobile); ?>" placeholder="Mobile number" autocomplete="tel">
+                            <?php if (FIREBASE_GUEST_PHONE_AUTH_ENABLED): ?>
+                                <button type="button" class="guest-phone-verify-btn" id="guestPhoneVerifyBtn" onclick="startGuestPhoneVerification()">Verify</button>
+                            <?php endif; ?>
+                        </div>
+                    </div>
+                </div>
+                <p id="guestInfoError" class="guest-info-error" style="display:none;"></p>
+                <p class="guest-info-note">Please make sure your contact information is correct. We'll use it to send your booking confirmation and any reminders to assist your booking completion.</p>
+                <button type="submit" id="guestInfoContinueBtn" class="guest-info-submit">Continue to booking</button>
+            </form>
+        </div>
+    </div>
+    <div id="guestPhoneVerifyPopup" class="guest-phone-verify-modal" hidden aria-hidden="true">
+        <div class="guest-phone-verify-content" role="dialog" aria-modal="true" aria-labelledby="guestPhoneVerifyTitle">
+            <button type="button" class="guest-phone-verify-close" onclick="closeGuestPhoneVerification()" aria-label="Close">&times;</button>
+            <h2 id="guestPhoneVerifyTitle">Verify mobile number</h2>
+            <p id="guestPhoneVerifyMessage">Enter the 6-digit code sent by SMS.</p>
+            <div id="guestPhoneRecaptcha"></div>
+            <label for="guestPhoneVerificationCode">SMS verification code</label>
+            <input type="text" id="guestPhoneVerificationCode" inputmode="numeric" autocomplete="one-time-code" maxlength="6" placeholder="Enter code">
+            <p id="guestPhoneVerifyError" class="guest-info-error" style="display:none;"></p>
+            <button type="button" class="guest-info-submit" id="guestPhoneConfirmBtn" onclick="confirmGuestPhoneVerification()">Confirm verification</button>
+        </div>
+    </div>
+    <?php endif; ?>
+
+    <style>
+        .guest-info-modal {
+            display: none;
+            position: fixed;
+            inset: 0;
+            background: rgba(15, 23, 42, 0.55);
+            z-index: 3000;
+            align-items: center;
+            justify-content: center;
+            padding: 1rem;
+        }
+        .guest-info-modal.show {
+            display: flex;
+        }
+        .guest-info-modal-content {
+            background: #fff;
+            width: 100%;
+            max-width: 640px;
+            border-radius: 16px;
+            border: 1px solid #e2e8f0;
+            padding: 1.75rem;
+            position: relative;
+            box-shadow: 0 20px 50px rgba(15, 23, 42, 0.2);
+            max-height: 90vh;
+            overflow-y: auto;
+        }
+        .guest-info-modal-close {
+            position: absolute;
+            top: 0.85rem;
+            right: 0.95rem;
+            border: none;
+            background: transparent;
+            font-size: 1.6rem;
+            color: #64748b;
+            cursor: pointer;
+            line-height: 1;
+        }
+        .guest-info-modal-content h2 {
+            margin: 0 0 0.35rem 0;
+            color: #0f172a;
+            font-size: 1.45rem;
+        }
+        .guest-info-required {
+            color: #dc2626;
+            font-size: 0.85rem;
+            margin: 0 0 1.25rem 0;
+        }
+        .guest-info-grid {
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            gap: 1rem 1.1rem;
+        }
+        .guest-field {
+            display: flex;
+            flex-direction: column;
+            gap: 0.35rem;
+        }
+        .guest-field label {
+            font-size: 0.85rem;
+            font-weight: 600;
+            color: #334155;
+        }
+        .guest-field label span {
+            color: #dc2626;
+        }
+        .guest-field input,
+        .guest-field select {
+            width: 100%;
+            border: 1px solid #cbd5e1;
+            border-radius: 10px;
+            padding: 0.8rem 0.9rem;
+            font-size: 0.95rem;
+            color: #0f172a;
+            background: #fff;
+        }
+        .guest-field input:focus,
+        .guest-field select:focus {
+            outline: none;
+            border-color: #ff7a3d;
+            box-shadow: 0 0 0 3px rgba(255, 122, 61, 0.15);
+        }
+        .guest-field input[readonly] {
+            background: #f8fafc;
+            cursor: not-allowed;
+            color: #475569;
+            border-color: #e2e8f0;
+        }
+        .guest-field input[readonly]:focus {
+            border-color: #e2e8f0;
+            box-shadow: none;
+        }
+        .guest-field input[readonly]::placeholder {
+            color: #94a3b8;
+        }
+        .guest-mobile-row {
+            display: flex;
+            align-items: center;
+            gap: 0.5rem;
+        }
+        .guest-mobile-row input {
+            min-width: 0;
+            flex: 1;
+        }
+        .guest-phone-verify-btn,
+        .guest-phone-verified {
+            flex: 0 0 auto;
+            white-space: nowrap;
+        }
+        .guest-phone-verify-btn {
+            border: 1px solid #ff7a3d;
+            border-radius: 8px;
+            background: #fff7ed;
+            color: #ea580c;
+            padding: 0.8rem 0.75rem;
+            font-weight: 700;
+            cursor: pointer;
+        }
+        .guest-phone-verify-btn:hover {
+            background: #ffedd5;
+        }
+        .guest-phone-verified {
+            color: #047857;
+            font-size: 0.82rem;
+            font-weight: 700;
+        }
+        .guest-phone-verify-modal {
+            position: fixed;
+            inset: 0;
+            z-index: 3100;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            padding: 1rem;
+            background: rgba(15, 23, 42, 0.62);
+        }
+        .guest-phone-verify-modal[hidden] {
+            display: none;
+        }
+        .guest-phone-verify-content {
+            position: relative;
+            width: min(100%, 400px);
+            padding: 1.5rem;
+            background: #fff;
+            border-radius: 14px;
+            box-shadow: 0 20px 50px rgba(15, 23, 42, 0.3);
+        }
+        .guest-phone-verify-content h2 {
+            margin: 0 0 0.5rem;
+            color: #0f172a;
+        }
+        .guest-phone-verify-content p {
+            color: #64748b;
+            line-height: 1.45;
+        }
+        .guest-phone-verify-content label {
+            display: block;
+            margin: 1rem 0 0.35rem;
+            color: #334155;
+            font-weight: 600;
+        }
+        .guest-phone-verify-content input {
+            width: 100%;
+            box-sizing: border-box;
+            border: 1px solid #cbd5e1;
+            border-radius: 8px;
+            padding: 0.8rem;
+            font-size: 1rem;
+        }
+        .guest-phone-verify-close {
+            position: absolute;
+            top: 0.65rem;
+            right: 0.75rem;
+            border: 0;
+            background: transparent;
+            color: #64748b;
+            font-size: 1.5rem;
+            cursor: pointer;
+        }
+        .guest-info-note {
+            margin: 1.1rem 0 1.25rem 0;
+            color: #64748b;
+            font-size: 0.86rem;
+            line-height: 1.45;
+        }
+        .guest-info-error {
+            color: #b91c1c;
+            background: #fef2f2;
+            border: 1px solid #fecaca;
+            border-radius: 8px;
+            padding: 0.65rem 0.8rem;
+            font-size: 0.88rem;
+            margin: 0.85rem 0 0;
+        }
+        .guest-info-submit {
+            width: 100%;
+            border: none;
+            border-radius: 999px;
+            background: #ff7a3d;
+            color: #fff;
+            font-weight: 700;
+            font-size: 1rem;
+            padding: 0.9rem 1.2rem;
+            cursor: pointer;
+        }
+        .guest-info-submit:disabled {
+            opacity: 0.7;
+            cursor: not-allowed;
+        }
+        @media (max-width: 640px) {
+            .guest-info-grid {
+                grid-template-columns: 1fr;
+            }
+        }
+    </style>
+
+    <?php if (FIREBASE_GUEST_PHONE_AUTH_ENABLED): ?>
+        <script src="https://www.gstatic.com/firebasejs/10.12.2/firebase-app-compat.js"></script>
+        <script src="https://www.gstatic.com/firebasejs/10.12.2/firebase-auth-compat.js"></script>
+        <script>
+            firebase.initializeApp(<?php echo json_encode([
+                'apiKey' => FIREBASE_API_KEY,
+                'authDomain' => FIREBASE_AUTH_DOMAIN,
+                'projectId' => FIREBASE_PROJECT_ID,
+                'storageBucket' => FIREBASE_STORAGE_BUCKET,
+                'messagingSenderId' => FIREBASE_MESSAGING_SENDER_ID,
+                'appId' => FIREBASE_APP_ID,
+                'measurementId' => FIREBASE_MEASUREMENT_ID
+            ], JSON_UNESCAPED_SLASHES); ?>);
+        </script>
+    <?php endif; ?>
     <script>
+        let guestPhoneConfirmationResult = null;
+        let guestPhoneRecaptchaVerifier = null;
+
+        function normalizeGuestPhoneNumber(value) {
+            const digits = String(value || '').replace(/\D/g, '');
+            if (digits.startsWith('63')) return '+' + digits;
+            if (digits.startsWith('0')) return '+63' + digits.substring(1);
+            return '+' + digits;
+        }
+
+        function openGuestPhoneVerification() {
+            const modal = document.getElementById('guestPhoneVerifyPopup');
+            if (!modal) return;
+            modal.hidden = false;
+            modal.setAttribute('aria-hidden', 'false');
+            document.getElementById('guestPhoneVerificationCode')?.focus();
+        }
+
+        function closeGuestPhoneVerification() {
+            const modal = document.getElementById('guestPhoneVerifyPopup');
+            if (!modal) return;
+            modal.hidden = true;
+            modal.setAttribute('aria-hidden', 'true');
+        }
+
+        function setGuestPhoneVerificationError(text) {
+            const error = document.getElementById('guestPhoneVerifyError');
+            if (error) {
+                error.textContent = text;
+                error.style.display = text ? 'block' : 'none';
+            }
+        }
+
+        async function startGuestPhoneVerification() {
+            const input = document.getElementById('guestMobileNumber');
+            const button = document.getElementById('guestPhoneVerifyBtn');
+            const phoneNumber = normalizeGuestPhoneNumber(input?.value);
+            if (!/^\+63\d{10}$/.test(phoneNumber)) {
+                const error = document.getElementById('guestInfoError');
+                if (error) {
+                    error.textContent = 'Enter a valid Philippine mobile number before verifying.';
+                    error.style.display = 'block';
+                }
+                return;
+            }
+
+            if (button) button.disabled = true;
+            setGuestPhoneVerificationError('Sending SMS code...');
+            openGuestPhoneVerification();
+            try {
+                if (!guestPhoneRecaptchaVerifier) {
+                    guestPhoneRecaptchaVerifier = new firebase.auth.RecaptchaVerifier('guestPhoneRecaptcha', { size: 'normal' });
+                    await guestPhoneRecaptchaVerifier.render();
+                }
+                guestPhoneConfirmationResult = await firebase.auth().signInWithPhoneNumber(phoneNumber, guestPhoneRecaptchaVerifier);
+                setGuestPhoneVerificationError('SMS code sent. Enter it below.');
+            } catch (error) {
+                setGuestPhoneVerificationError(error.message || 'Unable to send the SMS code.');
+                if (guestPhoneRecaptchaVerifier) {
+                    guestPhoneRecaptchaVerifier.clear();
+                    guestPhoneRecaptchaVerifier = null;
+                }
+            } finally {
+                if (button) button.disabled = false;
+            }
+        }
+
+        async function confirmGuestPhoneVerification() {
+            const code = document.getElementById('guestPhoneVerificationCode')?.value.trim();
+            const confirmButton = document.getElementById('guestPhoneConfirmBtn');
+            if (!guestPhoneConfirmationResult || !/^\d{6}$/.test(code)) {
+                setGuestPhoneVerificationError('Enter the 6-digit SMS verification code.');
+                return;
+            }
+
+            if (confirmButton) confirmButton.disabled = true;
+            setGuestPhoneVerificationError('Verifying mobile number...');
+            try {
+                const result = await guestPhoneConfirmationResult.confirm(code);
+                const idToken = await result.user.getIdToken();
+                const response = await fetch('<?php echo SITE_URL; ?>api/firebase_verify_guest_phone.php', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json', 'Accept': 'application/json' },
+                    credentials: 'same-origin',
+                    body: JSON.stringify({ id_token: idToken })
+                });
+                const data = await response.json();
+                if (!response.ok || !data.success) throw new Error(data.message || 'Unable to verify mobile number.');
+
+                const input = document.getElementById('guestMobileNumber');
+                input.value = data.phone_number || input.value;
+                input.readOnly = true;
+                input.insertAdjacentHTML('afterend', '<span class="guest-phone-verified" id="guestPhoneVerified"><i class="fas fa-check-circle"></i> Verified</span>');
+                document.getElementById('guestPhoneVerifyBtn')?.remove();
+                closeGuestPhoneVerification();
+                setGuestPhoneVerificationError('');
+            } catch (error) {
+                setGuestPhoneVerificationError(error.message || 'Unable to verify mobile number.');
+                if (confirmButton) confirmButton.disabled = false;
+            }
+        }
+
         function openLoginModal() {
             const modal = document.getElementById('loginPopup');
             if (modal) {
@@ -532,16 +957,107 @@ if (isset($_SESSION['user_id'])) {
             }
         }
 
+        function openGuestInfoModal() {
+            const modal = document.getElementById('guestInfoPopup');
+            if (!modal) return false;
+            modal.hidden = false;
+            modal.classList.add('show');
+            modal.setAttribute('aria-hidden', 'false');
+            const firstInput = document.getElementById('guestFirstName');
+            if (firstInput) setTimeout(() => firstInput.focus(), 50);
+            return false;
+        }
+
+        function closeGuestInfoModal() {
+            const modal = document.getElementById('guestInfoPopup');
+            if (!modal) return;
+            modal.classList.remove('show');
+            modal.setAttribute('aria-hidden', 'true');
+            modal.hidden = true;
+        }
+
+        function handleBookNowClick(event) {
+            event.preventDefault();
+            openGuestInfoModal();
+            return false;
+        }
+
+        function submitGuestInfoForm(event) {
+            event.preventDefault();
+            const errorEl = document.getElementById('guestInfoError');
+            const submitBtn = document.getElementById('guestInfoContinueBtn');
+            
+            // Get input values and force uppercase
+            const firstName = (document.getElementById('guestFirstName')?.value || '').trim().toUpperCase();
+            const lastName = (document.getElementById('guestLastName')?.value || '').trim().toUpperCase();
+            
+            const payload = {
+                first_name: firstName,
+                last_name: lastName,
+                email: (document.getElementById('guestEmail')?.value || '').trim(),
+                mobile_number: (document.getElementById('guestMobileNumber')?.value || '').trim()
+            };
+
+            if (errorEl) {
+                errorEl.style.display = 'none';
+                errorEl.textContent = '';
+            }
+            if (submitBtn) {
+                submitBtn.disabled = true;
+                submitBtn.textContent = 'Saving...';
+            }
+
+            fetch('<?php echo SITE_URL; ?>api/save_guest_info.php', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json', 'Accept': 'application/json' },
+                credentials: 'same-origin',
+                body: JSON.stringify(payload)
+            })
+            .then(async (response) => {
+                const data = await response.json().catch(() => ({}));
+                if (!response.ok || !data.success) {
+                    throw new Error(data.message || 'Unable to save guest information.');
+                }
+                return data;
+            })
+            .then((data) => {
+                window.hasGuestInfo = true;
+                const onBookingPage = /booking\.php/i.test(window.location.pathname + window.location.href);
+                if (onBookingPage) {
+                    closeGuestInfoModal();
+                    return;
+                }
+                window.location.href = data.redirect || '<?php echo SITE_URL; ?>booking.php';
+            })
+            .catch((error) => {
+                if (errorEl) {
+                    errorEl.textContent = error.message;
+                    errorEl.style.display = 'block';
+                }
+                if (submitBtn) {
+                    submitBtn.disabled = false;
+                    submitBtn.textContent = 'Continue to booking';
+                }
+            });
+
+            return false;
+        }
+
         document.addEventListener('click', function(event) {
             const modal = document.getElementById('loginPopup');
             if (modal && modal.classList.contains('show') && event.target === modal) {
                 closeLoginModal();
+            }
+            const guestModal = document.getElementById('guestInfoPopup');
+            if (guestModal && guestModal.classList.contains('show') && event.target === guestModal) {
+                closeGuestInfoModal();
             }
         });
 
         document.addEventListener('keydown', function(event) {
             if (event.key === 'Escape') {
                 closeLoginModal();
+                closeGuestInfoModal();
                 closeUserDropdown();
             }
         });

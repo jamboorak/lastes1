@@ -5,6 +5,7 @@ if (session_status() === PHP_SESSION_NONE) {
 }
 require_once __DIR__ . '/../config/database.php';
 require_once __DIR__ . '/../models/User.php';
+require_once __DIR__ . '/../includes/ActivityLogger.php';
 
 // Check if user is logged in BEFORE including header
 if (!isset($_SESSION['user_id'])) {
@@ -21,19 +22,71 @@ $currentUser = $user->getCurrentUser();
 // Handle profile update
 $updateMessage = '';
 if ($_SERVER['REQUEST_METHOD'] === 'POST') {
+    if (isset($_POST['upload_avatar'])) {
+        $uploadError = '';
+        $avatarFile = $_FILES['avatar'] ?? null;
+        $allowedMimeTypes = ['image/jpeg', 'image/png', 'image/webp', 'image/gif'];
+
+        if (!$avatarFile || $avatarFile['error'] !== UPLOAD_ERR_OK) {
+            $uploadError = 'Please choose an image to upload.';
+        } elseif ($avatarFile['size'] > 5 * 1024 * 1024) {
+            $uploadError = 'Profile images must be 5 MB or smaller.';
+        } else {
+            $imageInfo = @getimagesize($avatarFile['tmp_name']);
+            $mimeType = $imageInfo['mime'] ?? '';
+            if (!$imageInfo || !in_array($mimeType, $allowedMimeTypes, true)) {
+                $uploadError = 'Please upload a valid JPG, PNG, WEBP, or GIF image.';
+            }
+        }
+
+        if ($uploadError === '') {
+            $uploadDirectory = __DIR__ . '/../uploads/profile/';
+            if (!is_dir($uploadDirectory)) {
+                mkdir($uploadDirectory, 0755, true);
+            }
+
+            $extension = strtolower(pathinfo($avatarFile['name'], PATHINFO_EXTENSION));
+            $fileName = 'avatar_' . $userId . '_' . bin2hex(random_bytes(8)) . '.' . $extension;
+            $destination = $uploadDirectory . $fileName;
+            if (move_uploaded_file($avatarFile['tmp_name'], $destination)) {
+                $avatarUrl = SITE_URL . 'uploads/profile/' . $fileName;
+                $result = $user->updateAvatar($userId, $avatarUrl);
+                if ($result['success']) {
+                    $activityDatabase = new Database();
+                    logUserActivity($activityDatabase->getConnection(), $userId, 'avatar_updated', 'Updated profile image');
+                }
+                $updateMessage = $result['success']
+                    ? '<div style="background-color: #d1fae5; color: #065f46; padding: 1rem; border-radius: 5px; margin-bottom: 1rem;"><i class="fas fa-check-circle"></i> ' . htmlspecialchars($result['message']) . '</div>'
+                    : '<div style="background-color: #fee2e2; color: #7f1d1d; padding: 1rem; border-radius: 5px; margin-bottom: 1rem;"><i class="fas fa-exclamation-circle"></i> ' . htmlspecialchars($result['message']) . '</div>';
+                $currentUser = $user->getCurrentUser();
+            } else {
+                $uploadError = 'Unable to save the uploaded image.';
+            }
+        }
+
+        if ($uploadError !== '') {
+            $updateMessage = '<div style="background-color: #fee2e2; color: #7f1d1d; padding: 1rem; border-radius: 5px; margin-bottom: 1rem;"><i class="fas fa-exclamation-circle"></i> ' . htmlspecialchars($uploadError) . '</div>';
+        }
+    } else {
     $fullname = $_POST['fullname'] ?? '';
     $email = $_POST['email'] ?? '';
     $phone = $_POST['phone'] ?? '';
 
+    // Use the existing email from database since it's readonly
+    $email = $currentUser['email'] ?? '';
+
     if (!empty($fullname) && !empty($email) && !empty($phone)) {
         $result = $user->updateProfile($userId, $fullname, $email, $phone);
         if ($result['success']) {
+            $activityDatabase = new Database();
+            logUserActivity($activityDatabase->getConnection(), $userId, 'profile_updated', 'Updated profile information');
             $updateMessage = '<div style="background-color: #d1fae5; color: #065f46; padding: 1rem; border-radius: 5px; margin-bottom: 1rem;"><i class="fas fa-check-circle"></i> Profile updated successfully!</div>';
             // Refresh current user data
             $currentUser = $user->getCurrentUser();
         } else {
             $updateMessage = '<div style="background-color: #fee2e2; color: #7f1d1d; padding: 1rem; border-radius: 5px; margin-bottom: 1rem;"><i class="fas fa-exclamation-circle"></i> ' . htmlspecialchars($result['message']) . '</div>';
         }
+    }
     }
 }
 ?>
@@ -79,6 +132,32 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             color: white;
             font-size: 3rem;
             flex-shrink: 0;
+            overflow: hidden;
+        }
+
+        .profile-avatar img {
+            width: 100%;
+            height: 100%;
+            object-fit: cover;
+        }
+
+        .avatar-upload {
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            gap: 0.5rem;
+            flex-shrink: 0;
+        }
+
+        .avatar-upload-button {
+            border: 0;
+            border-radius: 999px;
+            padding: 0.55rem 0.85rem;
+            background: #102a43;
+            color: #fff;
+            font-size: 0.8rem;
+            font-weight: 700;
+            cursor: pointer;
         }
 
         .profile-info h1 {
@@ -125,6 +204,18 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             outline: none;
             border-color: #ff7a3d;
             box-shadow: 0 0 0 3px rgba(255, 122, 61, 0.1);
+        }
+
+        .form-group input[readonly] {
+            background: #f8fafc;
+            cursor: not-allowed;
+            color: #475569;
+            border-color: #e2e8f0;
+        }
+
+        .form-group input[readonly]:focus {
+            border-color: #e2e8f0;
+            box-shadow: none;
         }
 
         .form-actions {
@@ -188,8 +279,20 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
 <body>
     <main class="profile-page">
         <div class="profile-header">
-            <div class="profile-avatar">
-                <i class="fas fa-user"></i>
+            <div class="avatar-upload">
+                <div class="profile-avatar">
+                    <?php if (!empty($currentUser['avatar'])): ?>
+                        <img src="<?php echo htmlspecialchars($currentUser['avatar']); ?>" alt="Profile photo">
+                    <?php else: ?>
+                        <i class="fas fa-user"></i>
+                    <?php endif; ?>
+                </div>
+                <form method="POST" enctype="multipart/form-data">
+                    <input type="hidden" name="upload_avatar" value="1">
+                    <input type="file" name="avatar" id="avatarUpload" accept="image/jpeg,image/png,image/webp,image/gif" hidden required>
+                    <label for="avatarUpload" class="avatar-upload-button"><i class="fas fa-camera"></i> Upload Profile</label>
+                    <button type="submit" id="avatarSubmit" hidden>Upload</button>
+                </form>
             </div>
             <div class="profile-info">
                 <h1><?php echo htmlspecialchars($currentUser['fullname'] ?? 'User'); ?></h1>
@@ -223,6 +326,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                         name="email" 
                         value="<?php echo htmlspecialchars($currentUser['email'] ?? ''); ?>" 
                         required
+                        readonly
                     >
                 </div>
 
@@ -244,5 +348,12 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             </form>
         </div>
     </main>
+    <script>
+        document.getElementById('avatarUpload')?.addEventListener('change', function() {
+            if (this.files.length > 0) {
+                this.form.submit();
+            }
+        });
+    </script>
 </body>
 </html>

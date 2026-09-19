@@ -12,6 +12,7 @@ require_once __DIR__ . '/../config/RoomConfig.php';
 // Get parameters
 $startDate = $_GET['start_date'] ?? date('Y-m-d');
 $endDate = $_GET['end_date'] ?? date('Y-m-d', strtotime('+1 day'));
+$tourType = strtolower((string)($_GET['tour_type'] ?? 'day')) === 'night' ? 'night' : 'day';
 $items = $_GET['items'] ?? []; // JSON array of item names to check
 
 // Validate dates
@@ -58,14 +59,36 @@ try {
             $seedData[] = ['cottage', $cottage['name'], getReservationLimit($cottage['name'])];
         }
         
-        $stmt = $conn->prepare("INSERT INTO reservation_limits (item_type, item_name, daily_limit) VALUES (?, ?, ?)");
-        if ($stmt) {
+        // Try to insert into reservation_limits table if it exists
+        $checkTable = $conn->query("SHOW TABLES LIKE 'reservation_limits'");
+        if ($checkTable && $checkTable->num_rows > 0) {
+            $stmt = $conn->prepare("INSERT INTO reservation_limits (item_type, item_name, daily_limit) VALUES (?, ?, ?)");
+            if ($stmt) {
+                foreach ($seedData as $data) {
+                    $stmt->bind_param('ssi', $data[0], $data[1], $data[2]);
+                    $stmt->execute();
+                    $itemLimits[$data[1]] = $data[2];
+                }
+                $stmt->close();
+            }
+        } else {
+            // Table doesn't exist, just use config data directly
             foreach ($seedData as $data) {
-                $stmt->bind_param('ssi', $data[0], $data[1], $data[2]);
-                $stmt->execute();
                 $itemLimits[$data[1]] = $data[2];
             }
-            $stmt->close();
+        }
+    }
+
+    // Use independent room/cottage limits for the requested tour type.
+    $slotColumn = $tourType === 'night' ? 'night_slots' : 'day_slots';
+    foreach (['rooms', 'cottages'] as $facilityTable) {
+        $facilityResult = $conn->query("SELECT name, {$slotColumn} AS tour_slots FROM {$facilityTable}");
+        if ($facilityResult) {
+            while ($facility = $facilityResult->fetch_assoc()) {
+                if (isset($facility['tour_slots'])) {
+                    $itemLimits[$facility['name']] = (int)$facility['tour_slots'];
+                }
+            }
         }
     }
     
@@ -96,15 +119,18 @@ try {
                     JOIN reservations r ON ri.reservation_id = r.id
                     WHERE r.status IN ('pending', 'approved')
                       AND ri.item_name = ?
-                      AND ? >= r.check_in
-                      AND ? < r.check_out";
+                                            AND COALESCE(r.tour_type, 'day') = ?
+                      AND (
+                            (r.check_in = r.check_out AND ? = r.check_in)
+                         OR (r.check_in <> r.check_out AND ? >= r.check_in AND ? < r.check_out)
+                      )";
             
             $stmt = $conn->prepare($sql);
             if (!$stmt) {
                 throw new Exception("Prepare failed: " . $conn->error);
             }
             
-            $stmt->bind_param("sss", $itemName, $date, $date);
+            $stmt->bind_param("sssss", $itemName, $tourType, $date, $date, $date);
             $stmt->execute();
             $result = $stmt->get_result();
             $row = $result->fetch_assoc();
@@ -129,6 +155,7 @@ try {
         'success' => true,
         'start_date' => $startDate,
         'end_date' => $endDate,
+        'tour_type' => $tourType,
         'dates' => $dates,
         'availability' => $availability
     ]);

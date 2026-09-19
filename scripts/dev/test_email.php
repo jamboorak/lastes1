@@ -4,7 +4,7 @@
  * Tests if the mail() function is working properly
  */
 
-require_once '../config/config.php';
+require_once __DIR__ . '/../../config/config.php';
 
 echo "<h2>📧 Email System Diagnostic</h2>";
 echo "<hr>";

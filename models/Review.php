@@ -149,8 +149,8 @@ class Review {
             return ['success' => false, 'message' => 'Review must not exceed 30 words'];
         }
         
-        if (strlen($reviewText) < 10) {
-            return ['success' => false, 'message' => 'Review must be at least 10 characters'];
+        if (strlen($reviewText) < 3) {
+            return ['success' => false, 'message' => 'Review must be at least 3 characters'];
         }
         
         if (strlen($reviewText) > 1000) {

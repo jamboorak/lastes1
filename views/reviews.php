@@ -59,7 +59,7 @@ $pageTitle = 'Guest Reviews - Villa Soledad Garden Resort';
                         <h3 style="color: #6b7280; margin-bottom: 1rem;">No Reviews Yet</h3>
                         <p style="color: #9ca3af;">Be the first to share your experience!</p>
                         <?php if ($user->isLoggedIn()): ?>
-                            <a href="index.php#reviews" class="btn-primary" style="display: inline-block; margin-top: 1rem; background: #FF7A3D; color: white; padding: 0.75rem 1.5rem; border-radius: 8px; text-decoration: none; font-weight: 600;">Write a Review</a>
+                            <button type="button" class="btn-primary" onclick="openReviewModal('create')" style="display: inline-block; margin-top: 1rem; background: #FF7A3D; color: white; padding: 0.75rem 1.5rem; border: 0; border-radius: 8px; text-decoration: none; font-weight: 600; cursor: pointer;">Create Feedback</button>
                         <?php else: ?>
                             <a href="google-auth.php?action=login" class="btn-primary" style="display: inline-block; margin-top: 1rem; background: #FF7A3D; color: white; padding: 0.75rem 1.5rem; border-radius: 8px; text-decoration: none; font-weight: 600;">Login to Review</a>
                         <?php endif; ?>
@@ -104,7 +104,7 @@ $pageTitle = 'Guest Reviews - Villa Soledad Garden Resort';
                                 </div>
                                 <?php if ($user->isLoggedIn() && isset($_SESSION['user_id']) && $review['user_id'] == $_SESSION['user_id']): ?>
                                     <div class="review-actions" style="display: flex; gap: 0.5rem;">
-                                        <a href="edit-review.php?id=<?php echo $review['id']; ?>" style="color: #6b7280; text-decoration: none; font-size: 0.875rem; padding: 0.25rem 0.5rem; border-radius: 4px; transition: all 0.2s;">Edit</a>
+                                        <button type="button" class="review-edit-button" data-review-id="<?php echo (int)$review['id']; ?>" data-rating="<?php echo (int)$review['rating']; ?>" data-review-text="<?php echo htmlspecialchars($reviewText, ENT_QUOTES, 'UTF-8'); ?>" style="color: #6b7280; text-decoration: none; font-size: 0.875rem; padding: 0.25rem 0.5rem; border: 0; background: transparent; border-radius: 4px; transition: all 0.2s; cursor: pointer;">Edit</button>
                                         <a href="controllers/ReviewController.php?action=delete&id=<?php echo $review['id']; ?>" style="color: #dc2626; text-decoration: none; font-size: 0.875rem; padding: 0.25rem 0.5rem; border-radius: 4px; transition: all 0.2s;" onclick="return confirm('Are you sure you want to delete this review?');">Delete</a>
                                     </div>
                                 <?php endif; ?>
@@ -119,7 +119,7 @@ $pageTitle = 'Guest Reviews - Villa Soledad Garden Resort';
                 <h3 style="color: #1f2937; margin-bottom: 1rem;">Share Your Experience</h3>
                 <p style="color: #6b7280; margin-bottom: 2rem;">Your feedback helps us improve and helps other guests make informed decisions.</p>
                 <?php if ($user->isLoggedIn()): ?>
-                    <a href="index.php#reviews" class="btn-primary" style="display: inline-block; background: #FF7A3D; color: white; padding: 1rem 2rem; border-radius: 8px; text-decoration: none; font-weight: 600; transition: all 0.3s;">Write a Review</a>
+                    <button type="button" class="btn-primary" onclick="openReviewModal('create')" style="display: inline-block; background: #FF7A3D; color: white; padding: 1rem 2rem; border: 0; border-radius: 8px; text-decoration: none; font-weight: 600; transition: all 0.3s; cursor: pointer;">Create Feedback</button>
                 <?php else: ?>
                     <a href="google-auth.php?action=login" class="btn-primary" style="display: inline-block; background: #FF7A3D; color: white; padding: 1rem 2rem; border-radius: 8px; text-decoration: none; font-weight: 600; transition: all 0.3s;">Login to Write Review</a>
                 <?php endif; ?>
@@ -127,6 +127,30 @@ $pageTitle = 'Guest Reviews - Villa Soledad Garden Resort';
         </div>
     </section>
 </main>
+
+<?php if ($user->isLoggedIn()): ?>
+<div id="reviewModal" class="review-modal" role="dialog" aria-modal="true" aria-labelledby="reviewModalTitle" aria-hidden="true">
+    <div class="review-modal-content">
+        <button type="button" class="review-modal-close" onclick="closeReviewModal()" aria-label="Close">&times;</button>
+        <h2 id="reviewModalTitle">Create Feedback</h2>
+        <form action="<?php echo SITE_URL; ?>controllers/ReviewController.php?action=create" method="POST" id="reviewForm">
+            <input type="hidden" name="rating" id="reviewRatingInput" value="0">
+            <div class="review-modal-rating">
+                <p>Select a rating: <span aria-hidden="true">*</span></p>
+                <div class="review-modal-stars" role="radiogroup" aria-label="Rating">
+                    <?php for ($i = 1; $i <= 5; $i++): ?>
+                        <button type="button" class="review-star" data-rating="<?php echo $i; ?>" role="radio" aria-label="<?php echo $i; ?> stars"><i class="far fa-star"></i></button>
+                    <?php endfor; ?>
+                </div>
+            </div>
+            <label for="reviewText">Your feedback</label>
+            <textarea name="review_text" id="reviewText" maxlength="1000" required placeholder="Tell us about your stay at Villa Soledad"></textarea>
+            <p class="review-word-count">Maximum 30 words. <span id="reviewWordCount">0</span>/30 words used.</p>
+            <button type="submit" class="review-submit-button">Submit Feedback</button>
+        </form>
+    </div>
+</div>
+<?php endif; ?>
 
 <style>
 .reviews-section {
@@ -145,6 +169,115 @@ $pageTitle = 'Guest Reviews - Villa Soledad Garden Resort';
 
 .review-actions a:hover {
     background: #f3f4f6;
+}
+
+.review-actions button:hover {
+    background: #f3f4f6 !important;
+}
+
+.review-modal {
+    position: fixed;
+    inset: 0;
+    z-index: 10000;
+    display: none;
+    align-items: center;
+    justify-content: center;
+    padding: 1rem;
+    background: rgba(15, 23, 42, 0.7);
+}
+
+.review-modal.open {
+    display: flex;
+}
+
+.review-modal-content {
+    position: relative;
+    width: min(760px, 100%);
+    max-height: 90vh;
+    overflow-y: auto;
+    padding: 2.5rem;
+    background: #fff;
+    border-radius: 16px;
+    box-shadow: 0 24px 70px rgba(15, 23, 42, 0.25);
+}
+
+.review-modal-close {
+    position: absolute;
+    top: 1rem;
+    right: 1rem;
+    border: 0;
+    background: transparent;
+    color: #64748b;
+    font-size: 1.8rem;
+    cursor: pointer;
+}
+
+.review-modal-content h2 {
+    margin: 0 0 1.5rem;
+    color: #123b75;
+}
+
+.review-modal-rating p,
+.review-modal-content label {
+    display: block;
+    margin: 0 0 0.6rem;
+    color: #64748b;
+}
+
+.review-modal-rating p span {
+    color: #dc2626;
+}
+
+.review-modal-stars {
+    display: flex;
+    gap: 0.35rem;
+    margin-bottom: 1.5rem;
+}
+
+.review-star {
+    padding: 0;
+    border: 0;
+    background: transparent;
+    color: #cbd5e1;
+    font-size: 2rem;
+    cursor: pointer;
+}
+
+.review-star.selected,
+.review-star.preview {
+    color: #ff7a3d;
+}
+
+.review-modal-content textarea {
+    width: 100%;
+    min-height: 150px;
+    padding: 1rem;
+    border: 1px solid #dbe2ea;
+    border-radius: 8px;
+    color: #1f2937;
+    font: inherit;
+    resize: vertical;
+}
+
+.review-word-count {
+    margin: 0.75rem 0 1.5rem;
+    color: #2563a6;
+}
+
+.review-submit-button {
+    border: 0;
+    border-radius: 999px;
+    padding: 0.85rem 1.75rem;
+    background: #ff7a3d;
+    color: #fff;
+    font-weight: 700;
+    cursor: pointer;
+}
+
+@media (max-width: 600px) {
+    .review-modal-content {
+        padding: 2rem 1.25rem 1.5rem;
+    }
 }
 
 .btn-primary:hover {
@@ -180,14 +313,86 @@ $pageTitle = 'Guest Reviews - Villa Soledad Garden Resort';
 </style>
 
 <script>
-// Add interactive star rating display
 document.addEventListener('DOMContentLoaded', function() {
-    const stars = document.querySelectorAll('.stars i');
-    stars.forEach(star => {
+    const modal = document.getElementById('reviewModal');
+    const form = document.getElementById('reviewForm');
+    const ratingInput = document.getElementById('reviewRatingInput');
+    const textInput = document.getElementById('reviewText');
+    const wordCount = document.getElementById('reviewWordCount');
+    const stars = document.querySelectorAll('.review-star');
+
+    document.querySelectorAll('.stars i').forEach(star => {
         star.style.fontSize = '1rem';
         star.style.marginRight = '0.25rem';
+    });
+
+    function updateStars(rating) {
+        stars.forEach(star => {
+            const active = Number(star.dataset.rating) <= rating;
+            star.classList.toggle('selected', active);
+            star.querySelector('i').className = active ? 'fas fa-star' : 'far fa-star';
+        });
+    }
+
+    function updateWordCount() {
+        if (!textInput || !wordCount) return;
+        const words = textInput.value.trim() ? textInput.value.trim().split(/\s+/).length : 0;
+        wordCount.textContent = words;
+        wordCount.style.color = words > 30 ? '#dc2626' : '#2563a6';
+    }
+
+    stars.forEach(star => star.addEventListener('click', function() {
+        ratingInput.value = this.dataset.rating;
+        updateStars(Number(this.dataset.rating));
+    }));
+    textInput?.addEventListener('input', updateWordCount);
+
+    form?.addEventListener('submit', function(event) {
+        const rating = Number(ratingInput.value);
+        const words = textInput.value.trim() ? textInput.value.trim().split(/\s+/).length : 0;
+        if (rating < 1 || words < 1 || words > 30) {
+            event.preventDefault();
+            alert(rating < 1 ? 'Please select a rating.' : 'Please keep your feedback within 30 words.');
+        }
+    });
+
+    modal?.addEventListener('click', function(event) {
+        if (event.target === modal) closeReviewModal();
+    });
+
+    document.addEventListener('keydown', function(event) {
+        if (event.key === 'Escape') closeReviewModal();
+    });
+
+    window.openReviewModal = function(mode, reviewId = '', rating = 0, reviewText = '') {
+        if (!modal || !form) return;
+        const editing = mode === 'edit';
+        form.action = editing
+            ? '<?php echo SITE_URL; ?>controllers/ReviewController.php?action=update&id=' + encodeURIComponent(reviewId)
+            : '<?php echo SITE_URL; ?>controllers/ReviewController.php?action=create';
+        document.getElementById('reviewModalTitle').textContent = editing ? 'Edit Feedback' : 'Create Feedback';
+        document.querySelector('.review-submit-button').textContent = editing ? 'Save Feedback' : 'Submit Feedback';
+        ratingInput.value = rating;
+        textInput.value = reviewText;
+        updateStars(Number(rating));
+        updateWordCount();
+        modal.classList.add('open');
+        modal.setAttribute('aria-hidden', 'false');
+        textInput.focus();
+    };
+
+    window.closeReviewModal = function() {
+        if (!modal) return;
+        modal.classList.remove('open');
+        modal.setAttribute('aria-hidden', 'true');
+    };
+
+    document.querySelectorAll('.review-edit-button').forEach(button => {
+        button.addEventListener('click', function() {
+            openReviewModal('edit', this.dataset.reviewId, Number(this.dataset.rating), this.dataset.reviewText);
+        });
     });
 });
 </script>
 
-<?php require_once 'includes/footer.php'; ?>
+<?php require_once __DIR__ . '/../includes/footer.php'; ?>

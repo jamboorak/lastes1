@@ -108,7 +108,7 @@ if ($foodCount === 0) {
     }
 }
 
-$foodsResult = $conn->query("SELECT * FROM foods WHERE status = 'active' ORDER BY name");
+$foodsResult = $conn->query("SELECT * FROM foods WHERE status = 'active' AND archived = 0 ORDER BY name");
 $foods = $foodsResult ? $foodsResult->fetch_all(MYSQLI_ASSOC) : [];
 
 $categories = ['Starters','Main Course','Soups','All Day Breakfast','Hot Beverages','Non-Alcoholic','Sides','Vegetables','Rice Meals','Dessert','Cocktails'];
@@ -393,4 +393,4 @@ document.addEventListener('DOMContentLoaded', function() {
 });
 </script>
 
-<?php require_once 'includes/footer.php'; ?>
+<?php require_once __DIR__ . '/../includes/footer.php'; ?>

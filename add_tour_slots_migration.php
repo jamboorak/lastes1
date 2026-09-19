@@ -1,0 +1,1 @@
+<?php require_once __DIR__ . '/scripts/migrations/add_tour_slots_migration.php';

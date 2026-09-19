@@ -1,7 +1,7 @@
 </main>
 
     <!-- Footer -->
-    <footer class="footer">
+    <footer class="footer" style="background: #2F58AD !important;">
         <div class="container">
             <div class="footer-content">
                 <div class="footer-section">
@@ -13,7 +13,9 @@
                 <div class="footer-section">
                     <h3>Follow Us</h3>
                     <div class="social-icons">
-                        <a href="https://www.facebook.com/Villasoledadgardenresort"><i class="fab fa-facebook-f"></i></a>
+                        <a class="social-facebook" href="https://www.facebook.com/Villasoledadgardenresort" aria-label="Facebook"><i class="fab fa-facebook-f"></i></a>
+                        <a class="social-instagram" href="https://www.instagram.com/villasoledadgardenresort/" target="_blank" rel="noopener noreferrer" aria-label="Instagram"><i class="fab fa-instagram"></i></a>
+                        <a class="social-tiktok" href="https://www.tiktok.com/@villasoledadgardenresort" target="_blank" rel="noopener noreferrer" aria-label="TikTok"><i class="fab fa-tiktok"></i></a>
                     </div>
                 </div>
             </div>

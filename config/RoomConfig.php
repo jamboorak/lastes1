@@ -6,14 +6,24 @@
  */
 
 // Room Configuration (Database canonical data)
+// Inclusions sourced from Villa Soledad brochure cards
 const DEFAULT_ROOMS = [
     [
         'name' => 'Standard Room',
         'description' => 'Comfortable rooms perfect for couples with resort access for 2',
-        'capacity' => 2,
-        'price' => 2500.00,
+        'capacity' => 4,
+        'price' => 2800.00,
         'image' => 'images/standard.jpg',
-        'available' => 1
+        'available' => 1,
+        'promo' => 'Free Breakfast',
+        'inclusions' => [
+            'Good for 2pax (maximum of 4 pax)',
+            'Resort Access for 2',
+            'Aircon Room',
+            '2 Full Sized Bed',
+            'Shower w/heater',
+            'Extra person with Breakfast Php 800'
+        ]
     ],
     [
         'name' => 'Deluxe Room',
@@ -21,7 +31,16 @@ const DEFAULT_ROOMS = [
         'capacity' => 4,
         'price' => 2800.00,
         'image' => 'images/deluxe.jpg',
-        'available' => 1
+        'available' => 1,
+        'promo' => 'Free Breakfast',
+        'inclusions' => [
+            'Good for 2pax (maximum of 4 pax)',
+            'Resort Access for 2',
+            'Aircon Room',
+            '2 Full Sized Bed',
+            'Shower w/heater',
+            'Extra person with Breakfast Php 800'
+        ]
     ],
     [
         'name' => 'Family Room',
@@ -29,7 +48,17 @@ const DEFAULT_ROOMS = [
         'capacity' => 6,
         'price' => 3500.00,
         'image' => 'images/family-room.svg',
-        'available' => 1
+        'available' => 1,
+        'promo' => 'Free Breakfast for 4',
+        'inclusions' => [
+            'Good for 4pax (maximum of 6 pax)',
+            'Resort Access for 4',
+            'Aircon Room',
+            '1 Full Sized Bed',
+            '1 Double Deck',
+            'Shower w/heater',
+            'Extra person with Breakfast Php 800'
+        ]
     ],
     [
         'name' => 'Family Deluxe Room',
@@ -37,7 +66,17 @@ const DEFAULT_ROOMS = [
         'capacity' => 8,
         'price' => 5500.00,
         'image' => 'images/family-deluxe-room.svg',
-        'available' => 1
+        'available' => 1,
+        'promo' => 'Free Breakfast for 6',
+        'inclusions' => [
+            'Good for 6pax (maximum of 8 pax)',
+            'Resort Access for 6',
+            'Aircon Room',
+            '4 Full Sized Bed',
+            '2 Toilet & Bath',
+            'Shower w/heater',
+            'Extra person with Breakfast Php 800'
+        ]
     ]
 ];
 
@@ -106,4 +145,101 @@ function getReservationLimit($itemName) {
  */
 function getAllReservationLimits() {
     return RESERVATION_LIMITS;
+}
+
+/**
+ * Get brochure display details for a room by name
+ */
+function getRoomDisplayDetails($roomName) {
+    foreach (DEFAULT_ROOMS as $room) {
+        if (strcasecmp($room['name'], (string)$roomName) === 0) {
+            return $room;
+        }
+    }
+    return null;
+}
+
+/**
+ * Build a short summary line from room inclusions
+ */
+function getRoomInclusionsSummary($roomName) {
+    $details = getRoomDisplayDetails($roomName);
+    if (!$details) {
+        return '';
+    }
+    $promo = $details['promo'] ?? '';
+    $first = $details['inclusions'][0] ?? '';
+    return trim($promo . ($promo && $first ? ' • ' : '') . $first);
+}
+
+/**
+ * Seed brochure defaults only for rooms that do not exist yet.
+ * Never overwrites admin-edited description, price, or capacity.
+ */
+function syncRoomBrochureData($conn) {
+    if (!$conn) {
+        return;
+    }
+
+    $checkStmt = $conn->prepare('SELECT id FROM rooms WHERE name = ? LIMIT 1');
+    $insertStmt = $conn->prepare(
+        'INSERT INTO rooms (name, description, capacity, price_per_night, image_url, available) VALUES (?, ?, ?, ?, ?, ?)'
+    );
+    if (!$checkStmt || !$insertStmt) {
+        return;
+    }
+
+    foreach (DEFAULT_ROOMS as $room) {
+        $name = $room['name'];
+        $checkStmt->bind_param('s', $name);
+        $checkStmt->execute();
+        $exists = $checkStmt->get_result()->fetch_assoc();
+        if ($exists) {
+            continue;
+        }
+
+        $description = $room['description'];
+        $capacity = (int)$room['capacity'];
+        $price = (float)$room['price'];
+        $image = $room['image'];
+        $available = (int)($room['available'] ?? 1);
+        $insertStmt->bind_param('ssidsi', $name, $description, $capacity, $price, $image, $available);
+        $insertStmt->execute();
+    }
+
+    $checkStmt->close();
+    $insertStmt->close();
+}
+
+/**
+ * Render brochure inclusions HTML for room cards / modals
+ */
+function renderRoomInclusionsHtml($roomName, $compact = false) {
+    $details = getRoomDisplayDetails($roomName);
+    if (!$details) {
+        return '';
+    }
+
+    $fontSize = $compact ? '0.95rem' : '1.05rem';
+    $lineHeight = $compact ? '1.45' : '1.6';
+    $promoSize = $compact ? '0.82rem' : '0.9rem';
+    $html = '';
+
+    if (!empty($details['promo'])) {
+        $html .= '<div style="display:inline-block; background:#fff7ed; color:#c2410c; font-weight:700; font-size:' . $promoSize . '; padding:0.25rem 0.6rem; border-radius:999px; margin-bottom:0.5rem;">'
+            . htmlspecialchars($details['promo'])
+            . '</div>';
+    }
+
+    $items = $details['inclusions'];
+    $items[] = 'Check-in time: 3-PM';
+    $items[] = 'Check-out time: 12 Noon';
+
+    $html .= '<ul style="margin:0; padding-left:1.15rem; color:#334155; font-size:' . $fontSize . '; line-height:' . $lineHeight . '; font-weight:500;">';
+    foreach ($items as $item) {
+        $html .= '<li style="margin-bottom:0.22rem;">' . htmlspecialchars($item) . '</li>';
+    }
+    $html .= '</ul>';
+
+    return $html;
 }

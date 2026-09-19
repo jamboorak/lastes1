@@ -1,7 +1,15 @@
 <?php
 require_once 'config/config.php';
+require_once 'config/database.php';
+require_once 'includes/ActivityLogger.php';
 if (session_status() === PHP_SESSION_NONE) {
     session_start();
+}
+
+$logoutUserId = $_SESSION['user_id'] ?? null;
+if ($logoutUserId) {
+    $logoutDatabase = new Database();
+    logUserActivity($logoutDatabase->getConnection(), $logoutUserId, 'logout', 'User logged out');
 }
 
 // Clear all user session variables

@@ -9,6 +9,8 @@ header('Content-Type: application/json');
 require_once __DIR__ . '/../config/config.php';
 require_once __DIR__ . '/../config/database.php';
 require_once __DIR__ . '/../config/RoomConfig.php';
+require_once __DIR__ . '/../includes/guest_info_schema.php';
+require_once __DIR__ . '/../includes/ActivityLogger.php';
 
 if (session_status() === PHP_SESSION_NONE) {
     session_start();
@@ -20,6 +22,7 @@ error_log("Session data: " . print_r($_SESSION, true));
 // Initialize database connection
 $db = new Database();
 $conn = $db->getConnection();
+ensureGuestInfoSchema($conn);
 
 // Check if user is logged in
 if (!isset($_SESSION['user_id'])) {
@@ -32,16 +35,17 @@ if (!isset($_SESSION['user_id'])) {
 $sessionUserId = $_SESSION['user_id'];
 error_log("Session user ID: $sessionUserId");
 
-// Verify the user exists in either users or user_accounts table
+// Verify the user exists in the active users table.
+// Some older installations still reference user_accounts, but that table is no longer guaranteed to exist.
 $userExists = false;
-$verifyUserSql = "SELECT id FROM users WHERE id = ? UNION SELECT id FROM user_accounts WHERE id = ?";
+$verifyUserSql = "SELECT id FROM users WHERE id = ? LIMIT 1";
 $verifyStmt = $conn->prepare($verifyUserSql);
-$verifyStmt->bind_param("ii", $sessionUserId, $sessionUserId);
+$verifyStmt->bind_param("i", $sessionUserId);
 $verifyStmt->execute();
 $userCheckResult = $verifyStmt->get_result();
 
 if ($userCheckResult->num_rows === 0) {
-    // Session user ID doesn't exist in either table
+    // Session user ID doesn't exist in the current users table
     http_response_code(401);
     echo json_encode(['success' => false, 'message' => 'User not found. Please log in again.']);
     exit();
@@ -51,6 +55,34 @@ $userId = $sessionUserId;
 error_log("Session user ID $sessionUserId verified and exists in database");
 
 error_log("Final user ID being used: $userId");
+
+$guestInfoId = (int)($_SESSION['guest_info_id'] ?? 0);
+if ($guestInfoId <= 0) {
+    http_response_code(400);
+    echo json_encode([
+        'success' => false,
+        'message' => 'Please provide lead guest information before confirming your reservation.',
+        'require_guest_info' => true
+    ]);
+    exit();
+}
+
+// Confirm guest_info belongs to this user (or is still valid)
+$guestCheck = $conn->prepare('SELECT id FROM guest_info WHERE id = ? AND (user_id = ? OR user_id IS NULL) LIMIT 1');
+$guestCheck->bind_param('ii', $guestInfoId, $userId);
+$guestCheck->execute();
+$guestRow = $guestCheck->get_result()->fetch_assoc();
+$guestCheck->close();
+if (!$guestRow) {
+    unset($_SESSION['guest_info_id'], $_SESSION['guest_info']);
+    http_response_code(400);
+    echo json_encode([
+        'success' => false,
+        'message' => 'Lead guest information expired. Please enter guest details again.',
+        'require_guest_info' => true
+    ]);
+    exit();
+}
 
 // Get POST data
 $data = json_decode(file_get_contents('php://input'), true);
@@ -83,30 +115,32 @@ if (empty($checkIn)) {
     $checkIn = date('Y-m-d');
 }
 
-// Calculate check-out based on tour type
-// Day tour: check-out is same day (5 PM)
-// Night tour: check-out is next day (overnight)
-if (empty($checkOut)) {
-    if ($tourType === 'day') {
-        $checkOut = $checkIn; // Same day for day tour
-    } else {
-        $checkOut = date('Y-m-d', strtotime($checkIn . ' +1 day')); // Next day for night tour
-    }
+// Normalize check-out from tour type:
+// Day tour: same day | Night tour: next day
+$tourType = strtolower(trim((string)$tourType)) === 'night' ? 'night' : 'day';
+if ($tourType === 'day') {
+    $checkOut = $checkIn;
+} else {
+    $checkOut = date('Y-m-d', strtotime($checkIn . ' +1 day'));
 }
 
 function getItemLimit($conn, $itemName) {
-    $sql = "SELECT daily_limit FROM reservation_limits WHERE item_name = ? LIMIT 1";
-    $stmt = $conn->prepare($sql);
-    if ($stmt) {
-        $stmt->bind_param('s', $itemName);
-        $stmt->execute();
-        $res = $stmt->get_result()->fetch_assoc();
-        if (!empty($res) && isset($res['daily_limit'])) {
-            return (int)$res['daily_limit'];
+    // Check if reservation_limits table exists first
+    $checkTable = $conn->query("SHOW TABLES LIKE 'reservation_limits'");
+    if ($checkTable && $checkTable->num_rows > 0) {
+        $sql = "SELECT daily_limit FROM reservation_limits WHERE item_name = ? LIMIT 1";
+        $stmt = $conn->prepare($sql);
+        if ($stmt) {
+            $stmt->bind_param('s', $itemName);
+            $stmt->execute();
+            $res = $stmt->get_result()->fetch_assoc();
+            if (!empty($res) && isset($res['daily_limit'])) {
+                return (int)$res['daily_limit'];
+            }
         }
     }
 
-    // Fallback to centralized config if DB entry not found
+    // Fallback to centralized config if DB entry not found or table doesn't exist
     return getReservationLimit($itemName);
 }
 
@@ -123,17 +157,22 @@ function getBookingDates($checkIn, $checkOut) {
     return $dates;
 }
 
-function getReservedCount($conn, $itemName, $date) {
+function getReservedCount($conn, $itemName, $date, $tourType) {
+    // Day tour: check_in == check_out (occupies that calendar day)
+    // Night tour: occupies nights from check_in up to (but not including) check_out
     $sql = "SELECT COUNT(*) as reserved_count
             FROM reservation_items ri
             JOIN reservations r ON ri.reservation_id = r.id
             WHERE r.status IN ('pending', 'approved')
               AND ri.item_name = ?
-              AND ? >= r.check_in
-              AND ? < r.check_out";
+                            AND COALESCE(r.tour_type, 'day') = ?
+              AND (
+                    (r.check_in = r.check_out AND ? = r.check_in)
+                 OR (r.check_in <> r.check_out AND ? >= r.check_in AND ? < r.check_out)
+              )";
 
     $stmt = $conn->prepare($sql);
-    $stmt->bind_param("sss", $itemName, $date, $date);
+    $stmt->bind_param("sssss", $itemName, $tourType, $date, $date, $date);
     $stmt->execute();
     $result = $stmt->get_result()->fetch_assoc();
 
@@ -149,7 +188,7 @@ foreach ($items as $item) {
     $limit = getItemLimit($conn, $item['name']);
 
     foreach ($bookingDates as $date) {
-        $reservedCount = getReservedCount($conn, $item['name'], $date);
+        $reservedCount = getReservedCount($conn, $item['name'], $date, $tourType);
         
         // Count how many of this item are being booked in the current request
         $currentBookingCount = 0;
@@ -174,12 +213,12 @@ try {
     // Start transaction
     $conn->begin_transaction();
     
-    // Insert main reservation record
-    $reservationSql = "INSERT INTO reservations (user_id, check_in, check_out, adults, children, seniors, total_amount, tour_type, status, created_at) 
-                       VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'pending', NOW())";
+    // Insert main reservation record (linked to lead guest info)
+    $reservationSql = "INSERT INTO reservations (user_id, guest_info_id, check_in, check_out, adults, children, seniors, total_amount, tour_type, status, created_at) 
+                       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', NOW())";
     
     $stmt = $conn->prepare($reservationSql);
-    $stmt->bind_param("issiiids", $userId, $checkIn, $checkOut, $adults, $children, $seniors, $totalAmount, $tourType);
+    $stmt->bind_param("iissiiids", $userId, $guestInfoId, $checkIn, $checkOut, $adults, $children, $seniors, $totalAmount, $tourType);
     $stmt->execute();
     $reservationId = $stmt->insert_id;
     
@@ -197,6 +236,7 @@ try {
     
     // Commit transaction
     $conn->commit();
+    logUserActivity($conn, $userId, 'reservation_created', 'Created reservation #' . $reservationId);
     
     echo json_encode(['success' => true, 'message' => 'Reservation submitted successfully and is pending approval', 'reservation_id' => $reservationId]);
     

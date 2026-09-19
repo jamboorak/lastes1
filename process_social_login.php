@@ -5,9 +5,11 @@ if (session_status() === PHP_SESSION_NONE) {
 }
 require_once 'config/database.php';
 require_once 'models/User.php';
+require_once 'includes/ActivityLogger.php';
 
 // Initialize database connection
 $database = new Database();
+$activityConn = $database->getConnection();
 
 // Initialize User model
 $user = new User($database);
@@ -54,6 +56,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['social_login'])) {
             
             // Update last login
             $user->updateLastLogin($existingUser['id']);
+            logUserActivity($activityConn, $existingUser['id'], 'login', 'User logged in with ' . $provider);
             
             $redirectUrl = $existingUser['role'] === 'admin' ? 'admin/dashboard.php' : 'index.php';
             
@@ -88,6 +91,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['social_login'])) {
                     
                     // Update last login
                     $user->updateLastLogin($emailUser['id']);
+                    logUserActivity($activityConn, $emailUser['id'], 'login', 'User logged in with linked ' . $provider . ' account');
                     
                     $redirectUrl = $emailUser['role'] === 'admin' ? 'admin/dashboard.php' : 'index.php';
                     
@@ -132,6 +136,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['social_login'])) {
                     
                     // Update last login
                     $user->updateLastLogin($newUserId);
+                    logUserActivity($activityConn, $newUserId, 'login', 'User created an account and logged in with ' . $provider);
                     
                     echo json_encode([
                         'success' => true,

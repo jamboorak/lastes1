@@ -1,18 +1,18 @@
 <?php
-require_once '../config/database.php';
-require_once '../config/config.php';
-require_once '../includes/header.php';
+require_once __DIR__ . '/../config/database.php';
+require_once __DIR__ . '/../config/config.php';
+require_once __DIR__ . '/../includes/header.php';
 
 $db = new Database();
 $conn = $db->getConnection();
 $conn->query("CREATE TABLE IF NOT EXISTS pools (id INT(11) AUTO_INCREMENT PRIMARY KEY, name VARCHAR(100) NOT NULL, description TEXT, capacity INT(11) NOT NULL, features TEXT, status VARCHAR(20) NOT NULL DEFAULT 'active', image_url VARCHAR(255), available BOOLEAN DEFAULT TRUE)");
-$publicPoolsSql = "SELECT * FROM pools WHERE status = 'active' ORDER BY id";
+$publicPoolsSql = "SELECT * FROM pools WHERE status IN ('active', 'maintenance') ORDER BY id";
 $publicPoolsResult = $conn->query($publicPoolsSql);
 $publicPools = $publicPoolsResult ? $publicPoolsResult->fetch_all(MYSQLI_ASSOC) : [];
 ?>
 
     <!-- Hero Section -->
-    <section id="home" class="hero" style="background: linear-gradient(rgba(30, 58, 138, 0.7), rgba(30, 58, 138, 0.7)), url('../images/hero-bg.jpg') no-repeat center/cover; min-height: 3px; padding: 0; display: flex; align-items: center; justify-content: center;">
+    <section id="home" class="hero" style="background: linear-gradient(rgba(30, 58, 138, 0.7), rgba(30, 58, 138, 0.7)), url('<?php echo SITE_URL; ?>images/hero-bg.jpg') no-repeat center/cover; min-height: 3px; padding: 0; display: flex; align-items: center; justify-content: center;">
         <div class="hero-content" style="text-align: center; padding: 0; margin: 0;">
             <h1 style="font-size: 2.8rem; margin: 0; padding: 0; color: white;">Our Pools</h1>
             <p style="font-size: 1.15rem; margin: 0; padding: 0; color: rgba(255,255,255,0.95);">Enjoy refreshing swimming and relaxation</p>
@@ -20,7 +20,7 @@ $publicPools = $publicPoolsResult ? $publicPoolsResult->fetch_all(MYSQLI_ASSOC) 
     </section>
 
     <!-- Pools Section -->
-    <section id="pools" style="background: var(--white); padding: 3rem 0 2rem; border-bottom: 8px solid var(--primary-blue);">
+    <section id="pools" style="background: var(--white); padding: 3rem 0 0; border-bottom: 8px solid var(--primary-blue);">
         <div class="container">
             <h2 style="text-align: center; color: var(--accent-orange); margin-bottom: 2rem; font-size: 2.2rem; font-weight: 700;">Pools we offer</h2>
 
@@ -34,14 +34,18 @@ $publicPools = $publicPoolsResult ? $publicPoolsResult->fetch_all(MYSQLI_ASSOC) 
                         <?php if (!empty($publicPools)): ?>
                             <?php foreach ($publicPools as $index => $pool): ?>
                             <div class="pool-card pool-card-<?php echo $index; ?>" style="position: absolute; top: 0; left: 50%; width: 360px; height: 420px; transform-style: preserve-3d; transform-origin: center center; transition: transform 0.8s ease, opacity 0.8s ease;">
-                                <div style="width: 100%; height: 100%; border-radius: 28px; overflow: hidden; box-shadow: 0 28px 60px rgba(15, 23, 42, 0.14); background: #fff;">
-                                    <img src="<?php echo htmlspecialchars(!empty($pool['image_url']) ? $pool['image_url'] : '../images/private%20pool.png'); ?>" alt="<?php echo htmlspecialchars($pool['name'] ?? 'Pool'); ?>" style="width: 100%; height: 220px; object-fit: cover; display: block;" />
+                                <div style="width: 100%; height: 100%; border-radius: 28px; overflow: hidden; box-shadow: 0 28px 60px rgba(15, 23, 42, 0.14); background: #fff; position: relative;">
+                                    <img src="<?php echo htmlspecialchars(!empty($pool['image_url']) ? $pool['image_url'] : SITE_URL . 'images/private pool.png'); ?>" alt="<?php echo htmlspecialchars($pool['name'] ?? 'Pool'); ?>" style="width: 100%; height: 220px; object-fit: cover; display: block;" />
+                                    <?php if ($pool['status'] === 'maintenance'): ?>
+                                    <div style="position: absolute; top: 10px; right: 10px; background: #ef4444; color: white; padding: 0.5rem 1rem; border-radius: 20px; font-weight: 600; font-size: 0.85rem; box-shadow: 0 2px 8px rgba(239, 68, 68, 0.3); z-index: 10;">
+                                        Under Maintenance
+                                    </div>
+                                    <?php endif; ?>
                                     <div style="padding: 1.5rem;">
                                         <h3 style="color: var(--primary-blue); font-size: 1.6rem; margin-bottom: 0.75rem;"><?php echo htmlspecialchars($pool['name'] ?? 'Pool'); ?></h3>
                                         <p style="color: #475569; line-height: 1.6; margin-bottom: 1rem;"><?php echo htmlspecialchars($pool['description'] ?? ''); ?></p>
-                                        <div style="display: flex; align-items: center; justify-content: space-between; gap: 1rem;">
+                                        <div style="display: flex; align-items: center; justify-content: flex-start; gap: 1rem;">
                                             <span style="color: var(--accent-orange); font-weight: 700;"><?php echo htmlspecialchars($pool['features'] ?? 'Available for guests'); ?></span>
-                                            <button type="button" onclick="openModalPool('<?php echo str_replace("'", "\\'", htmlspecialchars($pool['name'] ?? 'Pool', ENT_QUOTES)); ?>', '<?php echo str_replace("'", "\\'", htmlspecialchars($pool['description'] ?? '', ENT_QUOTES)); ?>', '<?php echo str_replace("'", "\\'", htmlspecialchars($pool['features'] ?? 'Available for guests', ENT_QUOTES)); ?>')" style="background: var(--accent-orange); color: white; border: none; padding: 0.8rem 1.2rem; border-radius: 999px; cursor: pointer; font-weight: 700;">Details</button>
                                         </div>
                                     </div>
                                 </div>
@@ -113,7 +117,7 @@ $publicPools = $publicPoolsResult ? $publicPoolsResult->fetch_all(MYSQLI_ASSOC) 
         <i class="fas fa-arrow-up"></i>
     </div>
 
-    <script src="../js/script.js"></script>
+    <script src="<?php echo SITE_URL; ?>js/script.js"></script>
     <script>
         let poolIndex = 0;
         const poolCards = document.querySelectorAll('.pool-card');
@@ -204,7 +208,7 @@ $publicPools = $publicPoolsResult ? $publicPoolsResult->fetch_all(MYSQLI_ASSOC) 
             <h2 style="color: #1e3a8a; font-size: 2rem; margin-bottom: 1rem; font-weight: 700;">Log in</h2>
             <p style="color: #6b7280; font-size: 0.95rem; margin-bottom: 2rem; line-height: 1.4;">We'll sign you in, or create an account if you don't have one.</p>
 
-            <button onclick="window.location.href='../process_social_login.php?provider=google'" style="width: 100%; padding: 0.95rem; background: #1E56DB; color: white; border: none; border-radius: 8px; font-weight: 600; cursor: pointer; display: flex; align-items: center; justify-content: center; gap: 0.7rem; font-size: 1rem; margin-bottom: 1rem; transition: all 0.3s ease;">
+            <button onclick="window.location.href='<?php echo SITE_URL; ?>google-auth.php?action=login'" style="width: 100%; padding: 0.95rem; background: #1E56DB; color: white; border: none; border-radius: 8px; font-weight: 600; cursor: pointer; display: flex; align-items: center; justify-content: center; gap: 0.7rem; font-size: 1rem; margin-bottom: 1rem; transition: all 0.3s ease;">
                 <i class="fab fa-google"></i> Sign in with Google
             </button>
 

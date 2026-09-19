@@ -6,6 +6,7 @@
 
 // Include configuration first to define SITE_URL
 require_once 'config/config.php';
+require_once 'config/firebase.php';
 
 // Load Google OAuth settings from environment variables or config constants.
 if (!defined('GOOGLE_CLIENT_ID')) {
@@ -153,6 +154,11 @@ $_SESSION['google_user_data']['google_id'] = $user_data['id'];
 $_SESSION['google_user_data']['avatar'] = $user_data['picture'] ?? null;
 $_SESSION['google_user_data']['email_verified'] = 1;
 $_SESSION['google_user_data']['registration_method'] = 'google';
+
+if (FIREBASE_PHONE_AUTH_ENABLED) {
+    header('Location: firebase-phone-verification.php');
+    exit;
+}
 
 // Clear OAuth state
 unset($_SESSION['oauth_state']);

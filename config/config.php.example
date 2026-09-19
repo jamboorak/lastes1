@@ -25,6 +25,10 @@ define('ITEMS_PER_PAGE', 10);
 define('GOOGLE_CLIENT_ID', 'your-google-client-id.apps.googleusercontent.com');
 define('GOOGLE_CLIENT_SECRET', 'your-google-client-secret');
 
+// OTP settings (seconds)
+define('OTP_EXPIRY_SECONDS', 180);          // 3 minutes
+define('OTP_RESEND_COOLDOWN_SECONDS', 120); // 2 minutes
+
 // Resort Information (Update as needed)
 define('RESORT_NAME', 'Villa Soledad Garden Resort');
 define('RESORT_PHONE', '+63-XXX-XXX-XXXX');

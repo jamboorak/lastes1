@@ -29,8 +29,8 @@ try {
     // Generate 6-digit OTP
     $otpCode = str_pad(random_int(0, 999999), 6, '0', STR_PAD_LEFT);
     
-    // Set expiry time (5 minutes from now)
-    $expiresAt = date('Y-m-d H:i:s', strtotime('+5 minutes'));
+    // Set expiry time (3 minutes from now)
+    $expiresAt = date('Y-m-d H:i:s', time() + (defined('OTP_EXPIRY_SECONDS') ? OTP_EXPIRY_SECONDS : 180));
     
     // Store user data as JSON
     $userDataJson = json_encode($userData);
@@ -111,7 +111,7 @@ function sendOTPEmail($toEmail, $otpCode, $userName) {
                     <div style='background: white; border: 2px solid #667eea; border-radius: 10px; padding: 20px; text-align: center; margin: 20px 0;'>
                         <span style='font-size: 36px; font-weight: bold; color: #667eea; letter-spacing: 5px;'>{$otpCode}</span>
                     </div>
-                    <p style='font-size: 14px; color: #666; margin-bottom: 10px;'>This OTP will expire in <strong>5 minutes</strong>.</p>
+                    <p style='font-size: 14px; color: #666; margin-bottom: 10px;'>This OTP will expire in <strong>3 minutes</strong>.</p>
                     <p style='font-size: 14px; color: #666; margin-bottom: 20px;'>If you did not request this verification, please ignore this email.</p>
                     <hr style='border: none; border-top: 1px solid #ddd; margin: 20px 0;'>
                     <p style='font-size: 12px; color: #999; text-align: center;'>This is an automated email. Please do not reply.</p>
@@ -123,7 +123,7 @@ function sendOTPEmail($toEmail, $otpCode, $userName) {
         ";
         
         $mail->Body = $emailBody;
-        $mail->AltBody = "Your OTP verification code is: {$otpCode}\n\nThis code will expire in 5 minutes.\n\nIf you did not request this verification, please ignore this email.";
+        $mail->AltBody = "Your OTP verification code is: {$otpCode}\n\nThis code will expire in 3 minutes.\n\nIf you did not request this verification, please ignore this email.";
         
         $mail->send();
         return true;

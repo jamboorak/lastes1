@@ -42,5 +42,5 @@ if ($logFile && file_exists($logFile)) {
 }
 
 echo "<hr>";
-echo "<p><a href='reservations.php'>← Back to Reservations</a></p>";
+echo "<p><a href='dashboard.php?section=reservations'>← Back to Reservations</a></p>";
 ?>

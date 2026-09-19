@@ -6,6 +6,7 @@
 require_once __DIR__ . '/../config/config.php';
 require_once __DIR__ . '/../models/Review.php';
 require_once __DIR__ . '/../models/User.php';
+require_once __DIR__ . '/../includes/ActivityLogger.php';
 
 class ReviewController {
     public $review;
@@ -45,6 +46,8 @@ class ReviewController {
         $result = $this->review->create($userId, $rating, $reviewText);
         
         if ($result['success']) {
+            $activityDatabase = new Database();
+            logUserActivity($activityDatabase->getConnection(), $userId, 'review_created', 'Created a review');
             $_SESSION['success'] = $result['message'];
         } else {
             $_SESSION['error'] = $result['message'];
@@ -92,7 +95,7 @@ class ReviewController {
         $this->requireAuth();
         
         if ($_SERVER['REQUEST_METHOD'] !== 'POST') {
-            $this->redirect(SITE_URL . 'my-reviews.php');
+            $this->redirect(SITE_URL . 'reviews.php');
             return;
         }
         
@@ -103,13 +106,15 @@ class ReviewController {
         $result = $this->review->update($reviewId, $userId, $rating, $reviewText);
         
         if ($result['success']) {
+            $activityDatabase = new Database();
+            logUserActivity($activityDatabase->getConnection(), $userId, 'review_updated', 'Updated review #' . (int)$reviewId);
             $_SESSION['success'] = $result['message'];
         } else {
             $_SESSION['error'] = $result['message'];
             $_SESSION['form_data'] = $_POST;
         }
         
-        $this->redirect(SITE_URL . 'my-reviews.php');
+        $this->redirect(SITE_URL . 'reviews.php');
     }
     
     /**
@@ -122,12 +127,14 @@ class ReviewController {
         $result = $this->review->delete($reviewId, $userId);
         
         if ($result['success']) {
+            $activityDatabase = new Database();
+            logUserActivity($activityDatabase->getConnection(), $userId, 'review_deleted', 'Deleted review #' . (int)$reviewId);
             $_SESSION['success'] = $result['message'];
         } else {
             $_SESSION['error'] = $result['message'];
         }
         
-        $this->redirect(SITE_URL . 'my-reviews.php');
+        $this->redirect(SITE_URL . 'reviews.php');
     }
     
     /**

@@ -4,6 +4,8 @@ if (session_status() === PHP_SESSION_NONE) {
     session_start();
 }
 require_once '../config/database.php';
+require_once '../includes/guest_info_schema.php';
+require_once '../includes/ActivityLogger.php';
 
 // Check if admin is logged in
 if (!isset($_SESSION['admin_logged_in']) || $_SESSION['admin_logged_in'] !== true) {
@@ -17,6 +19,144 @@ $adminName = $_SESSION['admin_name'] ?? 'Admin';
 // Get database connection
 $db = new Database();
 $conn = $db->getConnection();
+ensureGuestInfoSchema($conn);
+
+$conn->query("CREATE TABLE IF NOT EXISTS property_gallery_images (
+    id INT(11) AUTO_INCREMENT PRIMARY KEY,
+    property_type ENUM('room', 'cottage') NOT NULL,
+    property_id INT(11) NOT NULL,
+    image_path VARCHAR(255) NOT NULL,
+    sort_order INT(11) NOT NULL DEFAULT 0,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    INDEX idx_property_gallery (property_type, property_id)
+)");
+
+function savePropertyGalleryImages($conn, $files, $propertyType, $propertyId) {
+    if ($propertyId <= 0 || !isset($files['name']) || !is_array($files['name'])) {
+        return;
+    }
+
+    $uploadDir = __DIR__ . '/uploads/gallery/' . $propertyType . '/';
+    if (!is_dir($uploadDir)) {
+        mkdir($uploadDir, 0755, true);
+    }
+
+    $nextOrder = 0;
+    $orderStmt = $conn->prepare('SELECT COALESCE(MAX(sort_order), -1) + 1 AS next_order FROM property_gallery_images WHERE property_type = ? AND property_id = ?');
+    if ($orderStmt) {
+        $orderStmt->bind_param('si', $propertyType, $propertyId);
+        $orderStmt->execute();
+        $nextOrder = (int)($orderStmt->get_result()->fetch_assoc()['next_order'] ?? 0);
+        $orderStmt->close();
+    }
+
+    $insertStmt = $conn->prepare('INSERT INTO property_gallery_images (property_type, property_id, image_path, sort_order) VALUES (?, ?, ?, ?)');
+    if (!$insertStmt) {
+        return;
+    }
+
+    foreach ($files['name'] as $index => $originalName) {
+        $error = $files['error'][$index] ?? UPLOAD_ERR_NO_FILE;
+        $tmpName = $files['tmp_name'][$index] ?? '';
+        if ($error !== UPLOAD_ERR_OK || $tmpName === '' || !is_uploaded_file($tmpName)) {
+            continue;
+        }
+        if (@getimagesize($tmpName) === false || ($files['size'][$index] ?? 0) > 8 * 1024 * 1024) {
+            continue;
+        }
+
+        $extension = strtolower(pathinfo($originalName, PATHINFO_EXTENSION));
+        if (!in_array($extension, ['jpg', 'jpeg', 'png', 'webp', 'gif'], true)) {
+            continue;
+        }
+
+        $fileName = $propertyType . '_' . $propertyId . '_' . bin2hex(random_bytes(8)) . '.' . $extension;
+        if (!move_uploaded_file($tmpName, $uploadDir . $fileName)) {
+            continue;
+        }
+
+        $imagePath = SITE_URL . 'admin/uploads/gallery/' . $propertyType . '/' . $fileName;
+        $insertStmt->bind_param('sisi', $propertyType, $propertyId, $imagePath, $nextOrder);
+        $insertStmt->execute();
+        $nextOrder++;
+    }
+    $insertStmt->close();
+}
+
+// Add reversible archive state to managed catalog tables.
+foreach (['rooms', 'cottages', 'pools', 'foods'] as $archiveTable) {
+    $tableExists = $conn->query("SHOW TABLES LIKE '{$archiveTable}'");
+    if (!$tableExists || $tableExists->num_rows === 0) {
+        continue;
+    }
+    $archiveColumn = $conn->query("SHOW COLUMNS FROM `{$archiveTable}` LIKE 'archived'");
+    if ($archiveColumn && $archiveColumn->num_rows === 0) {
+        $conn->query("ALTER TABLE `{$archiveTable}` ADD COLUMN archived TINYINT(1) NOT NULL DEFAULT 0");
+    }
+}
+ensureActivityLogSchema($conn);
+$guestNameExpr = guestDisplayNameSql('gi', 'u');
+
+$activityAction = trim($_GET['activity_action'] ?? '');
+$activityUserId = (int)($_GET['activity_user_id'] ?? 0);
+$activityFrom = trim($_GET['activity_from'] ?? '');
+$activityTo = trim($_GET['activity_to'] ?? '');
+$activityUsersResult = $conn->query("SELECT id, fullname, email FROM users WHERE role = 'user' ORDER BY fullname");
+$activityUsers = $activityUsersResult ? $activityUsersResult->fetch_all(MYSQLI_ASSOC) : [];
+$activityWhere = ['1 = 1'];
+$activityParams = [];
+$activityTypes = '';
+if ($activityAction !== '') {
+    $activityWhere[] = 'a.action = ?';
+    $activityParams[] = $activityAction;
+    $activityTypes .= 's';
+}
+if ($activityUserId > 0) {
+    $activityWhere[] = 'a.user_id = ?';
+    $activityParams[] = $activityUserId;
+    $activityTypes .= 'i';
+}
+if ($activityFrom !== '') {
+    $activityWhere[] = 'a.created_at >= ?';
+    $activityParams[] = $activityFrom . ' 00:00:00';
+    $activityTypes .= 's';
+}
+if ($activityTo !== '') {
+    $activityWhere[] = 'a.created_at <= ?';
+    $activityParams[] = $activityTo . ' 23:59:59';
+    $activityTypes .= 's';
+}
+$activitySql = "SELECT a.*, COALESCE(u.fullname, u.email, 'Unknown user') AS user_name, u.email
+                FROM user_activity_log a
+                LEFT JOIN users u ON u.id = a.user_id
+                WHERE " . implode(' AND ', $activityWhere) . "
+                ORDER BY a.created_at DESC LIMIT 100";
+$activityStmt = $conn->prepare($activitySql);
+$activityLog = [];
+if ($activityStmt) {
+    if ($activityParams) {
+        $activityStmt->bind_param($activityTypes, ...$activityParams);
+    }
+    $activityStmt->execute();
+    $activityLog = $activityStmt->get_result()->fetch_all(MYSQLI_ASSOC);
+    $activityStmt->close();
+}
+
+/**
+ * Day tour: checkout = check-in day
+ * Night tour: checkout = next day
+ */
+function normalizeTourCheckoutDate($checkIn, $checkOut, $tourType = 'day') {
+    $checkIn = trim((string)$checkIn);
+    if ($checkIn === '') {
+        return $checkOut;
+    }
+    $tourType = strtolower(trim((string)$tourType)) === 'night' ? 'night' : 'day';
+    if ($tourType === 'day') {
+        return $checkIn;
+    }
+    return date('Y-m-d', strtotime($checkIn . ' +1 day'));
+}
 
 // Fetch statistics
 $statsQueries = [
@@ -37,12 +177,35 @@ foreach ($statsQueries as $key => $query) {
 }
 
 // Fetch pending reservations for the manage reservations section
-$recentReservationsSql = "SELECT r.id, r.check_in, r.check_out, r.total_amount, COALESCE(NULLIF(r.status, ''), 'pending') AS status, u.fullname as name, GROUP_CONCAT(CONCAT(ri.item_name, ' (', ri.item_type, ')') SEPARATOR ', ') as items FROM reservations r LEFT JOIN users u ON r.user_id = u.id LEFT JOIN reservation_items ri ON r.id = ri.reservation_id WHERE COALESCE(NULLIF(r.status, ''), 'pending') = 'pending' GROUP BY r.id ORDER BY r.created_at DESC LIMIT 10";
+$recentReservationsSql = "SELECT r.id, r.check_in, r.check_out, r.adults, r.children, r.seniors, r.total_amount, COALESCE(NULLIF(r.status, ''), 'pending') AS status, COALESCE(r.tour_type, 'day') AS tour_type, {$guestNameExpr} as name, COALESCE(NULLIF(TRIM(CONCAT(COALESCE(gi.mobile_country_code, ''), COALESCE(gi.mobile_number, ''))), ''), u.phone, '') AS guest_phone, GROUP_CONCAT(CONCAT(ri.item_name, ' (', ri.item_type, ')') SEPARATOR ', ') as items FROM reservations r LEFT JOIN users u ON r.user_id = u.id LEFT JOIN guest_info gi ON r.guest_info_id = gi.id LEFT JOIN reservation_items ri ON r.id = ri.reservation_id WHERE COALESCE(NULLIF(r.status, ''), 'pending') = 'pending' GROUP BY r.id ORDER BY r.created_at DESC LIMIT 10";
 $recentReservationsResult = $conn->query($recentReservationsSql);
-$recentReservations = $recentReservationsResult->fetch_all(MYSQLI_ASSOC);
+$recentReservations = $recentReservationsResult ? $recentReservationsResult->fetch_all(MYSQLI_ASSOC) : [];
+foreach ($recentReservations as &$pendingReservation) {
+    $pendingReservation['check_out'] = normalizeTourCheckoutDate(
+        $pendingReservation['check_in'] ?? '',
+        $pendingReservation['check_out'] ?? '',
+        $pendingReservation['tour_type'] ?? 'day'
+    );
+}
+unset($pendingReservation);
+
+// Notifications: pending reservations awaiting approval in Manage Reservations
+$notificationSql = "SELECT r.id, r.check_in, r.check_out, COALESCE(NULLIF(r.status, ''), 'pending') AS status,
+                           {$guestNameExpr} AS name,
+                           GROUP_CONCAT(CONCAT(ri.item_name, ' (', ri.item_type, ')') SEPARATOR ', ') AS items
+                    FROM reservations r
+                    LEFT JOIN users u ON r.user_id = u.id
+                    LEFT JOIN guest_info gi ON r.guest_info_id = gi.id
+                    LEFT JOIN reservation_items ri ON r.id = ri.reservation_id
+                    WHERE COALESCE(NULLIF(r.status, ''), 'pending') = 'pending'
+                    GROUP BY r.id
+                    ORDER BY r.created_at DESC";
+$notificationResult = $conn->query($notificationSql);
+$reservationNotifications = $notificationResult ? $notificationResult->fetch_all(MYSQLI_ASSOC) : [];
+$notificationCount = count($reservationNotifications);
 
 // Fetch processed reservations for the booking records section
-$bookingRecordsSql = "SELECT r.id, r.user_id, r.check_in, r.check_out, r.adults, r.children, r.seniors, r.total_amount, COALESCE(NULLIF(r.status, ''), 'pending') AS status, r.tour_type, COALESCE(u.fullname, 'Guest') AS guest_name, COALESCE(u.email, '') AS guest_email, COALESCE(u.phone, '') AS guest_phone, GROUP_CONCAT(CONCAT(ri.item_name, ' (', ri.item_type, ')') SEPARATOR ', ') AS items FROM reservations r LEFT JOIN users u ON r.user_id = u.id LEFT JOIN reservation_items ri ON r.id = ri.reservation_id WHERE COALESCE(NULLIF(r.status, ''), 'pending') IN ('approved', 'cancelled', 'completed') GROUP BY r.id ORDER BY r.created_at DESC";
+$bookingRecordsSql = "SELECT r.id, r.user_id, r.check_in, r.check_out, r.adults, r.children, r.seniors, r.total_amount, COALESCE(NULLIF(r.status, ''), 'pending') AS status, r.tour_type, {$guestNameExpr} AS guest_name, COALESCE(NULLIF(gi.email, ''), u.email, '') AS guest_email, COALESCE(NULLIF(TRIM(CONCAT(COALESCE(gi.mobile_country_code, ''), COALESCE(gi.mobile_number, ''))), ''), u.phone, '') AS guest_phone, GROUP_CONCAT(CONCAT(ri.item_name, ' (', ri.item_type, ')') SEPARATOR ', ') AS items FROM reservations r LEFT JOIN users u ON r.user_id = u.id LEFT JOIN guest_info gi ON r.guest_info_id = gi.id LEFT JOIN reservation_items ri ON r.id = ri.reservation_id WHERE COALESCE(NULLIF(r.status, ''), 'pending') IN ('approved', 'cancelled', 'completed') GROUP BY r.id ORDER BY r.created_at DESC";
 $bookingRecordsResult = $conn->query($bookingRecordsSql);
 $bookingRecords = [];
 
@@ -54,24 +217,26 @@ if ($bookingRecordsResult) {
         $items = trim($row['items'] ?? '');
         $guestCount = (int)($row['adults'] ?? 0) + (int)($row['children'] ?? 0) + (int)($row['seniors'] ?? 0);
         $tourType = $row['tour_type'] ?? 'day';
+        $checkIn = $row['check_in'];
+        $checkOut = normalizeTourCheckoutDate($checkIn, $row['check_out'] ?? '', $tourType);
 
         $bookingRecords[] = [
             'id' => (int) $row['id'],
             'guestName' => $guestName,
             'contact' => $guestEmail !== '' ? $guestEmail : $guestPhone,
             'items' => $items !== '' ? $items : 'No items',
-            'dates' => date('M d, Y', strtotime($row['check_in'])) . ' - ' . date('M d, Y', strtotime($row['check_out'])),
+            'dates' => date('M d, Y', strtotime($checkIn)) . ' - ' . date('M d, Y', strtotime($checkOut)),
             'guests' => $guestCount > 0 ? $guestCount : 1,
             'amount' => number_format((float) $row['total_amount'], 2, '.', ''),
             'status' => $row['status'] ?? 'pending',
-            'checkIn' => $row['check_in'],
-            'checkOut' => $row['check_out'],
+            'checkIn' => $checkIn,
+            'checkOut' => $checkOut,
             'tourType' => $tourType
         ];
     }
 }
 
-$activeSection = isset($_GET['section']) && in_array($_GET['section'], ['dashboard', 'reservations', 'booking-records', 'rooms', 'cottages', 'pools', 'foods', 'facilities', 'pricing', 'scheduling', 'reports', 'statistics', 'reviews', 'concerns', 'system-data', 'monitoring'], true) ? $_GET['section'] : 'dashboard';
+$activeSection = isset($_GET['section']) && in_array($_GET['section'], ['dashboard', 'reservations', 'booking-records', 'rooms', 'cottages', 'pools', 'foods', 'facilities', 'pricing', 'scheduling', 'reports', 'reviews', 'concerns', 'system-data', 'monitoring', 'maintenance'], true) ? $_GET['section'] : 'dashboard';
 $editingRoom = null;
 $editingCottage = null;
 $editingPool = null;
@@ -103,6 +268,13 @@ $conn->query("CREATE TABLE IF NOT EXISTS foods (
     created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
     updated_at DATETIME DEFAULT NULL ON UPDATE CURRENT_TIMESTAMP
 )");
+
+foreach (['pools', 'foods'] as $archiveTable) {
+    $archiveColumn = $conn->query("SHOW COLUMNS FROM `{$archiveTable}` LIKE 'archived'");
+    if ($archiveColumn && $archiveColumn->num_rows === 0) {
+        $conn->query("ALTER TABLE `{$archiveTable}` ADD COLUMN archived TINYINT(1) NOT NULL DEFAULT 0");
+    }
+}
 
 $foodCountResult = $conn->query("SELECT COUNT(*) AS count FROM foods");
 $foodCount = $foodCountResult ? (int) $foodCountResult->fetch_assoc()['count'] : 0;
@@ -201,7 +373,8 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         $description = trim($_POST['room_description'] ?? '');
         $capacity = max(1, (int)($_POST['room_capacity'] ?? 1));
         $pricePerNight = (float)($_POST['room_price'] ?? 0);
-        $dailySlots = max(1, (int)($_POST['room_slots'] ?? 1));
+        $daySlots = max(1, (int)($_POST['room_day_slots'] ?? 1));
+        $nightSlots = max(1, (int)($_POST['room_night_slots'] ?? 1));
         $available = isset($_POST['room_available']) ? 1 : 0;
         
         // Handle file upload
@@ -229,21 +402,21 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             $errorMessage = 'Room name is required.';
         } else {
             $stmt = $roomId > 0
-                ? $conn->prepare('UPDATE rooms SET name = ?, description = ?, capacity = ?, price_per_night = ?, image_url = ?, available = ?, daily_slots = ? WHERE id = ?')
-                : $conn->prepare('INSERT INTO rooms (name, description, capacity, price_per_night, image_url, available, daily_slots) VALUES (?, ?, ?, ?, ?, ?, ?)');
+                ? $conn->prepare('UPDATE rooms SET name = ?, description = ?, capacity = ?, price_per_night = ?, image_url = ?, available = ?, day_slots = ?, night_slots = ? WHERE id = ?')
+                : $conn->prepare('INSERT INTO rooms (name, description, capacity, price_per_night, image_url, available, day_slots, night_slots) VALUES (?, ?, ?, ?, ?, ?, ?, ?)');
 
             if ($stmt) {
                 if ($roomId > 0) {
-                    $stmt->bind_param('ssidsiii', $roomName, $description, $capacity, $pricePerNight, $imageUrl, $available, $dailySlots, $roomId);
+                    $stmt->bind_param('ssidsiiii', $roomName, $description, $capacity, $pricePerNight, $imageUrl, $available, $daySlots, $nightSlots, $roomId);
                 } else {
-                    $stmt->bind_param('ssidsii', $roomName, $description, $capacity, $pricePerNight, $imageUrl, $available, $dailySlots);
+                    $stmt->bind_param('ssidsiii', $roomName, $description, $capacity, $pricePerNight, $imageUrl, $available, $daySlots, $nightSlots);
                 }
 
                 if ($stmt->execute()) {
-                    $redirectSection = 'rooms';
-                    $redirectParams = ['section' => $redirectSection];
-                    $redirectUrl = 'dashboard.php?' . http_build_query($redirectParams);
-                    header('Location: ' . $redirectUrl);
+                    $savedRoomId = $roomId > 0 ? $roomId : $conn->insert_id;
+                    savePropertyGalleryImages($conn, $_FILES['room_images'] ?? [], 'room', $savedRoomId);
+                    $notice = $roomId > 0 ? 'updated' : 'added';
+                    header('Location: dashboard.php?section=rooms&notice=' . $notice . '&item=room');
                     exit();
                 } else {
                     $errorMessage = 'Unable to save room.';
@@ -252,18 +425,23 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                 $errorMessage = 'Unable to prepare room save query.';
             }
         }
-    } elseif ($roomAction === 'delete_room') {
+    } elseif ($roomAction === 'delete_room' || $roomAction === 'archive_room') {
         $roomId = isset($_POST['room_id']) ? (int)$_POST['room_id'] : 0;
         if ($roomId > 0) {
-            $stmt = $conn->prepare('DELETE FROM rooms WHERE id = ?');
+            $stmt = $conn->prepare('UPDATE rooms SET archived = 1, available = 0 WHERE id = ?');
             if ($stmt) {
                 $stmt->bind_param('i', $roomId);
                 $stmt->execute();
             }
         }
 
-        $redirectUrl = 'dashboard.php?section=rooms';
-        header('Location: ' . $redirectUrl);
+        header('Location: dashboard.php?section=rooms&notice=archived&item=room');
+        exit();
+    } elseif ($roomAction === 'restore_room') {
+        $roomId = (int)($_POST['room_id'] ?? 0);
+        $stmt = $conn->prepare('UPDATE rooms SET archived = 0, available = 1 WHERE id = ?');
+        if ($stmt) { $stmt->bind_param('i', $roomId); $stmt->execute(); }
+        header('Location: dashboard.php?section=rooms&notice=restored&item=room');
         exit();
     }
     } elseif (isset($_POST['cottage_action'])) {
@@ -274,7 +452,8 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             $description = trim($_POST['cottage_description'] ?? '');
             $capacity = max(1, (int)($_POST['cottage_capacity'] ?? 1));
             $pricePerNight = (float)($_POST['cottage_price'] ?? 0);
-            $dailySlots = max(1, (int)($_POST['cottage_slots'] ?? 1));
+            $daySlots = max(1, (int)($_POST['cottage_day_slots'] ?? 1));
+            $nightSlots = max(1, (int)($_POST['cottage_night_slots'] ?? 1));
             $available = isset($_POST['cottage_available']) ? 1 : 0;
             
             // Handle file upload
@@ -302,18 +481,21 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                 $cottageErrorMessage = 'Cottage name is required.';
             } else {
                 $stmt = $cottageId > 0
-                    ? $conn->prepare('UPDATE cottages SET name = ?, description = ?, capacity = ?, price_per_night = ?, image_url = ?, available = ?, daily_slots = ? WHERE id = ?')
-                    : $conn->prepare('INSERT INTO cottages (name, description, capacity, price_per_night, image_url, available, daily_slots) VALUES (?, ?, ?, ?, ?, ?, ?)');
+                    ? $conn->prepare('UPDATE cottages SET name = ?, description = ?, capacity = ?, price_per_night = ?, image_url = ?, available = ?, day_slots = ?, night_slots = ? WHERE id = ?')
+                    : $conn->prepare('INSERT INTO cottages (name, description, capacity, price_per_night, image_url, available, day_slots, night_slots) VALUES (?, ?, ?, ?, ?, ?, ?, ?)');
 
                 if ($stmt) {
                     if ($cottageId > 0) {
-                        $stmt->bind_param('ssidsiii', $cottageName, $description, $capacity, $pricePerNight, $imageUrl, $available, $dailySlots, $cottageId);
+                        $stmt->bind_param('ssidsiiii', $cottageName, $description, $capacity, $pricePerNight, $imageUrl, $available, $daySlots, $nightSlots, $cottageId);
                     } else {
-                        $stmt->bind_param('ssidsii', $cottageName, $description, $capacity, $pricePerNight, $imageUrl, $available, $dailySlots);
+                        $stmt->bind_param('ssidsiii', $cottageName, $description, $capacity, $pricePerNight, $imageUrl, $available, $daySlots, $nightSlots);
                     }
 
                     if ($stmt->execute()) {
-                        header('Location: dashboard.php?section=cottages');
+                        $savedCottageId = $cottageId > 0 ? $cottageId : $conn->insert_id;
+                        savePropertyGalleryImages($conn, $_FILES['cottage_images'] ?? [], 'cottage', $savedCottageId);
+                        $notice = $cottageId > 0 ? 'updated' : 'added';
+                        header('Location: dashboard.php?section=cottages&notice=' . $notice . '&item=cottage');
                         exit();
                     } else {
                         $cottageErrorMessage = 'Unable to save cottage.';
@@ -322,16 +504,22 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                     $cottageErrorMessage = 'Unable to prepare cottage save query.';
                 }
             }
-        } elseif ($cottageAction === 'delete_cottage') {
+        } elseif ($cottageAction === 'delete_cottage' || $cottageAction === 'archive_cottage') {
             $cottageId = isset($_POST['cottage_id']) ? (int)$_POST['cottage_id'] : 0;
             if ($cottageId > 0) {
-                $stmt = $conn->prepare('DELETE FROM cottages WHERE id = ?');
+                $stmt = $conn->prepare('UPDATE cottages SET archived = 1, available = 0 WHERE id = ?');
                 if ($stmt) {
                     $stmt->bind_param('i', $cottageId);
                     $stmt->execute();
                 }
             }
-            header('Location: dashboard.php?section=cottages');
+            header('Location: dashboard.php?section=cottages&notice=archived&item=cottage');
+            exit();
+        } elseif ($cottageAction === 'restore_cottage') {
+            $cottageId = (int)($_POST['cottage_id'] ?? 0);
+            $stmt = $conn->prepare('UPDATE cottages SET archived = 0, available = 1 WHERE id = ?');
+            if ($stmt) { $stmt->bind_param('i', $cottageId); $stmt->execute(); }
+            header('Location: dashboard.php?section=cottages&notice=restored&item=cottage');
             exit();
         }
     } elseif (isset($_POST['pool_action'])) {
@@ -381,7 +569,8 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                     }
 
                     if ($stmt->execute()) {
-                        header('Location: dashboard.php?section=pools');
+                        $notice = $poolId > 0 ? 'updated' : 'added';
+                        header('Location: dashboard.php?section=pools&notice=' . $notice . '&item=pool');
                         exit();
                     } else {
                         $poolErrorMessage = 'Unable to save pool.';
@@ -390,16 +579,22 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                     $poolErrorMessage = 'Unable to prepare pool save query.';
                 }
             }
-        } elseif ($poolAction === 'delete_pool') {
+        } elseif ($poolAction === 'delete_pool' || $poolAction === 'archive_pool') {
             $poolId = isset($_POST['pool_id']) ? (int)$_POST['pool_id'] : 0;
             if ($poolId > 0) {
-                $stmt = $conn->prepare('DELETE FROM pools WHERE id = ?');
+                $stmt = $conn->prepare('UPDATE pools SET archived = 1, available = 0 WHERE id = ?');
                 if ($stmt) {
                     $stmt->bind_param('i', $poolId);
                     $stmt->execute();
                 }
             }
-            header('Location: dashboard.php?section=pools');
+            header('Location: dashboard.php?section=pools&notice=archived&item=pool');
+            exit();
+        } elseif ($poolAction === 'restore_pool') {
+            $poolId = (int)($_POST['pool_id'] ?? 0);
+            $stmt = $conn->prepare('UPDATE pools SET archived = 0, available = 1 WHERE id = ?');
+            if ($stmt) { $stmt->bind_param('i', $poolId); $stmt->execute(); }
+            header('Location: dashboard.php?section=pools&notice=restored&item=pool');
             exit();
         }
     }
@@ -449,7 +644,8 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                     }
 
                     if ($stmt->execute()) {
-                        header('Location: dashboard.php?section=foods');
+                        $notice = $foodId > 0 ? 'updated' : 'added';
+                        header('Location: dashboard.php?section=foods&notice=' . $notice . '&item=food');
                         exit();
                     } else {
                         $errorMessage = 'Unable to save food.';
@@ -458,16 +654,22 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                     $errorMessage = 'Unable to prepare food save query.';
                 }
             }
-        } elseif ($foodAction === 'delete_food') {
+        } elseif ($foodAction === 'delete_food' || $foodAction === 'archive_food') {
             $foodId = isset($_POST['food_id']) ? (int)$_POST['food_id'] : 0;
             if ($foodId > 0) {
-                $stmt = $conn->prepare('DELETE FROM foods WHERE id = ?');
+                $stmt = $conn->prepare('UPDATE foods SET archived = 1, available = 0 WHERE id = ?');
                 if ($stmt) {
                     $stmt->bind_param('i', $foodId);
                     $stmt->execute();
                 }
             }
-            header('Location: dashboard.php?section=foods');
+            header('Location: dashboard.php?section=foods&notice=archived&item=food');
+            exit();
+        } elseif ($foodAction === 'restore_food') {
+            $foodId = (int)($_POST['food_id'] ?? 0);
+            $stmt = $conn->prepare('UPDATE foods SET archived = 0, available = 1 WHERE id = ?');
+            if ($stmt) { $stmt->bind_param('i', $foodId); $stmt->execute(); }
+            header('Location: dashboard.php?section=foods&notice=restored&item=food');
             exit();
         }
     }
@@ -507,22 +709,27 @@ if (isset($_GET['edit_pool']) && (int)$_GET['edit_pool'] > 0) {
 }
 
 // Fetch all rooms
-$roomsSql = "SELECT * FROM rooms ORDER BY id";
+$roomsSql = "SELECT * FROM rooms WHERE archived = 0 ORDER BY id";
 $roomsResult = $conn->query($roomsSql);
 $rooms = $roomsResult->fetch_all(MYSQLI_ASSOC);
 
-$cottagesSql = "SELECT * FROM cottages ORDER BY id";
+$cottagesSql = "SELECT * FROM cottages WHERE archived = 0 ORDER BY id";
 $cottagesResult = $conn->query($cottagesSql);
 $cottages = $cottagesResult ? $cottagesResult->fetch_all(MYSQLI_ASSOC) : [];
 
-$poolsSql = "SELECT * FROM pools ORDER BY id";
+$poolsSql = "SELECT * FROM pools WHERE archived = 0 ORDER BY id";
 $poolsResult = $conn->query($poolsSql);
 $pools = $poolsResult ? $poolsResult->fetch_all(MYSQLI_ASSOC) : [];
 
 // Fetch all foods
-$foodsSql = "SELECT * FROM foods ORDER BY id";
+$foodsSql = "SELECT * FROM foods WHERE archived = 0 ORDER BY id";
 $foodsResult = $conn->query($foodsSql);
 $foods = $foodsResult ? $foodsResult->fetch_all(MYSQLI_ASSOC) : [];
+
+$archivedRooms = ($result = $conn->query("SELECT id, name FROM rooms WHERE archived = 1 ORDER BY name")) ? $result->fetch_all(MYSQLI_ASSOC) : [];
+$archivedCottages = ($result = $conn->query("SELECT id, name FROM cottages WHERE archived = 1 ORDER BY name")) ? $result->fetch_all(MYSQLI_ASSOC) : [];
+$archivedPools = ($result = $conn->query("SELECT id, name FROM pools WHERE archived = 1 ORDER BY name")) ? $result->fetch_all(MYSQLI_ASSOC) : [];
+$archivedFoods = ($result = $conn->query("SELECT id, name FROM foods WHERE archived = 1 ORDER BY name")) ? $result->fetch_all(MYSQLI_ASSOC) : [];
 
 // Fetch recent reviews
 $reviewsSql = "SELECT r.*, u.fullname as name FROM reviews r LEFT JOIN users u ON r.user_id = u.id ORDER BY r.created_at DESC LIMIT 10";
@@ -537,6 +744,13 @@ $reviews = $reviewsResult->fetch_all(MYSQLI_ASSOC);
     <title>Admin Dashboard - Villa Soledad</title>
     <link rel="stylesheet" href="../css/style.css">
     <link href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.0.0/css/all.min.css" rel="stylesheet">
+    <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js"></script>
+    <script>
+        // Fallback CDN if jsDelivr is blocked
+        if (typeof Chart === 'undefined') {
+            document.write('<script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.0/chart.umd.min.js"><\/script>');
+        }
+    </script>
     <style>
         .admin-page .container {
             width: 100%;
@@ -558,7 +772,11 @@ $reviews = $reviewsResult->fetch_all(MYSQLI_ASSOC);
             background: var(--white);
             padding: 1.5rem;
             border-radius: 0;
-            min-height: calc(100vh - 130px);
+            position: sticky;
+            top: 80px;
+            height: calc(100vh - 80px);
+            align-self: start;
+            overflow-y: auto;
             box-shadow: 0 2px 10px rgba(0, 0, 0, 0.05);
         }
 
@@ -678,6 +896,33 @@ $reviews = $reviewsResult->fetch_all(MYSQLI_ASSOC);
             padding: 0.4rem 0.8rem;
             border: none;
             border-radius: 5px;
+        }
+
+        .food-tab {
+            padding: 0.5rem 1rem;
+            border: 1px solid var(--border-gray);
+            border-radius: 6px;
+            background: white;
+            cursor: pointer;
+            font-size: 0.9rem;
+            transition: all 0.2s;
+        }
+
+        .food-tab:hover {
+            background: var(--bg-light);
+        }
+
+        .food-tab.btn-primary {
+            background: var(--primary-blue);
+            color: white;
+            border-color: var(--primary-blue);
+        }
+
+        .food-tab.btn-primary:hover {
+            background: #1e3a8a;
+        }
+
+        .btn-primary {
             cursor: pointer;
             font-size: 0.85rem;
             font-weight: 600;
@@ -898,6 +1143,27 @@ $reviews = $reviewsResult->fetch_all(MYSQLI_ASSOC);
             background: #059669;
         }
 
+        .btn-loading {
+            display: inline-block;
+            width: 14px;
+            height: 14px;
+            border: 2px solid rgba(255, 255, 255, 0.35);
+            border-radius: 50%;
+            border-top-color: #ffffff;
+            animation: reservationBtnSpin 0.8s linear infinite;
+            margin-right: 8px;
+            vertical-align: middle;
+        }
+
+        @keyframes reservationBtnSpin {
+            to { transform: rotate(360deg); }
+        }
+
+        .reservation-action-btn:disabled {
+            opacity: 0.75;
+            cursor: wait;
+        }
+
         .btn-reject {
             background: #ef4444;
             color: white;
@@ -978,6 +1244,188 @@ $reviews = $reviewsResult->fetch_all(MYSQLI_ASSOC);
                 margin-top: 0.5rem;
             }
         }
+
+        /* Notification bell */
+        .notif-bell-wrap {
+            position: relative;
+        }
+
+        .notif-bell-btn {
+            background: transparent;
+            border: none;
+            color: var(--white);
+            font-size: 1.25rem;
+            cursor: pointer;
+            padding: 0.4rem 0.55rem;
+            position: relative;
+            line-height: 1;
+            border-radius: 8px;
+            transition: color 0.2s ease, background 0.2s ease;
+        }
+
+        .notif-bell-btn:hover {
+            color: var(--accent-orange);
+            background: rgba(255, 255, 255, 0.08);
+        }
+
+        .notif-badge {
+            position: absolute;
+            top: 0;
+            right: 0;
+            min-width: 18px;
+            height: 18px;
+            padding: 0 5px;
+            background: #ef4444;
+            color: #fff;
+            font-size: 0.7rem;
+            font-weight: 700;
+            border-radius: 999px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            line-height: 1;
+            box-shadow: 0 0 0 2px rgba(15, 76, 129, 0.9);
+            pointer-events: none;
+        }
+
+        .notif-badge.dot-only {
+            min-width: 10px;
+            width: 10px;
+            height: 10px;
+            padding: 0;
+            top: 4px;
+            right: 4px;
+        }
+
+        .notif-dropdown {
+            display: none;
+            position: absolute;
+            top: calc(100% + 0.75rem);
+            right: 0;
+            width: 360px;
+            max-width: min(360px, calc(100vw - 2rem));
+            background: #fff;
+            border-radius: 10px;
+            box-shadow: 0 12px 32px rgba(0, 0, 0, 0.18);
+            z-index: 1000;
+            overflow: hidden;
+            color: var(--text-dark);
+        }
+
+        .notif-dropdown.open {
+            display: block;
+        }
+
+        .notif-dropdown-header {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            padding: 0.9rem 1rem;
+            border-bottom: 1px solid #e5e7eb;
+            background: #f8fafc;
+        }
+
+        .notif-dropdown-header h4 {
+            margin: 0;
+            font-size: 0.95rem;
+            color: var(--primary-blue);
+        }
+
+        .notif-dropdown-list {
+            max-height: 320px;
+            overflow-y: auto;
+        }
+
+        .notif-item {
+            display: block;
+            width: 100%;
+            text-align: left;
+            padding: 0.85rem 1rem;
+            border: none;
+            border-bottom: 1px solid #f1f5f9;
+            background: #fff;
+            cursor: pointer;
+            transition: background 0.15s ease;
+        }
+
+        .notif-item:hover {
+            background: #f8fafc;
+        }
+
+        .notif-item-title {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            gap: 0.5rem;
+            font-weight: 600;
+            font-size: 0.9rem;
+            color: #0f172a;
+            margin-bottom: 0.25rem;
+        }
+
+        .notif-item-meta {
+            font-size: 0.8rem;
+            color: #64748b;
+            line-height: 1.35;
+        }
+
+        .notif-tag {
+            font-size: 0.68rem;
+            font-weight: 700;
+            text-transform: uppercase;
+            letter-spacing: 0.02em;
+            padding: 0.15rem 0.45rem;
+            border-radius: 999px;
+            white-space: nowrap;
+        }
+
+        .notif-tag.pending {
+            background: #fef3c7;
+            color: #b45309;
+        }
+
+        .notif-tag.coming {
+            background: #dbeafe;
+            color: #1d4ed8;
+        }
+
+        .notif-tag.today {
+            background: #fee2e2;
+            color: #b91c1c;
+        }
+
+        .notif-empty {
+            padding: 1.5rem 1rem;
+            text-align: center;
+            color: #94a3b8;
+            font-size: 0.9rem;
+        }
+
+        .notif-dropdown-footer {
+            padding: 0.75rem 1rem;
+            border-top: 1px solid #e5e7eb;
+            background: #f8fafc;
+        }
+
+        .notif-dropdown-footer button {
+            width: 100%;
+            border: none;
+            background: transparent;
+            color: var(--primary-blue);
+            font-weight: 600;
+            font-size: 0.85rem;
+            cursor: pointer;
+            padding: 0.35rem;
+        }
+
+        .notif-dropdown-footer button:hover {
+            color: var(--accent-orange);
+        }
+
+        .nav-links .notif-bell-wrap a::after,
+        .nav-links .notif-bell-btn::after {
+            display: none;
+        }
     </style>
 </head>
 <body class="admin-page">
@@ -990,7 +1438,46 @@ $reviews = $reviewsResult->fetch_all(MYSQLI_ASSOC);
                     <span style="font-size: 1.5rem; font-weight: 700; color: white;">Villa Soledad Garden Resort Admin</span>
                 </a>
                 <nav class="nav-links">
-                    <a href="../index.php">View Site</a>
+                    <div class="notif-bell-wrap">
+                        <button type="button" class="notif-bell-btn" id="notifBellBtn" aria-label="Reservation notifications" aria-expanded="false" aria-haspopup="true">
+                            <i class="fas fa-bell"></i>
+                            <?php if ($notificationCount > 0): ?>
+                                <span class="notif-badge" id="notifBadge"><?php echo $notificationCount > 99 ? '99+' : (int)$notificationCount; ?></span>
+                            <?php endif; ?>
+                        </button>
+                        <div class="notif-dropdown" id="notifDropdown" role="menu">
+                            <div class="notif-dropdown-header">
+                                <h4>Reservations</h4>
+                                <span id="notifAlertCount" style="font-size: 0.8rem; color: #64748b;"><?php echo (int)$notificationCount; ?> alert<?php echo $notificationCount === 1 ? '' : 's'; ?></span>
+                            </div>
+                            <div class="notif-dropdown-list" id="notifDropdownList">
+                                <?php if ($notificationCount === 0): ?>
+                                    <div class="notif-empty">No pending reservations</div>
+                                <?php else: ?>
+                                    <?php foreach ($reservationNotifications as $notif): ?>
+                                        <?php
+                                            $checkInTs = strtotime($notif['check_in']);
+                                            $guestName = trim($notif['name'] ?? '') !== '' ? $notif['name'] : 'Guest';
+                                            $itemsLabel = trim($notif['items'] ?? '') !== '' ? $notif['items'] : 'Reservation';
+                                        ?>
+                                        <button type="button" class="notif-item" data-section="reservations" role="menuitem">
+                                            <div class="notif-item-title">
+                                                <span><?php echo htmlspecialchars($guestName); ?></span>
+                                                <span class="notif-tag pending">Pending</span>
+                                            </div>
+                                            <div class="notif-item-meta">
+                                                #<?php echo (int)$notif['id']; ?> · <?php echo htmlspecialchars($itemsLabel); ?><br>
+                                                Check-in: <?php echo date('M d, Y', $checkInTs); ?>
+                                            </div>
+                                        </button>
+                                    <?php endforeach; ?>
+                                <?php endif; ?>
+                            </div>
+                            <div class="notif-dropdown-footer">
+                                <button type="button" id="notifViewAllBtn">View manage reservations</button>
+                            </div>
+                        </div>
+                    </div>
                     <a href="logout.php" style="color: var(--white); text-decoration: none;">Logout</a>
                 </nav>
             </div>
@@ -1003,16 +1490,15 @@ $reviews = $reviewsResult->fetch_all(MYSQLI_ASSOC);
             <!-- Sidebar -->
             <aside class="admin-sidebar">
                 <ul class="sidebar-menu">
-                    <li><a href="#" class="menu-link active" data-section="dashboard"><i class="fas fa-chart-line"></i> Dashboard</a></li>
-                    <li><a href="#" class="menu-link" data-section="reservations"><i class="fas fa-calendar-check"></i> Manage Reservations</a></li>
-                    <li><a href="#" class="menu-link" data-section="booking-records"><i class="fas fa-history"></i> Booking Records</a></li>
-                    <li><a href="#" class="menu-link" data-section="rooms"><i class="fas fa-door-open"></i> Manage Rooms</a></li>
-                    <li><a href="#" class="menu-link" data-section="cottages"><i class="fas fa-home"></i> Manage Cottages</a></li>
-                    <li><a href="#" class="menu-link" data-section="pools"><i class="fas fa-swimming-pool"></i> Manage Pools</a></li>
-                        <li><a href="#" class="menu-link" data-section="foods"><i class="fas fa-utensils"></i> Manage Food</a></li>
-                    <li><a href="#" class="menu-link" data-section="reports"><i class="fas fa-file-alt"></i> Reports</a></li>
-                    <li><a href="#" class="menu-link" data-section="statistics"><i class="fas fa-bar-chart"></i> Statistics</a></li>
-                    <li><a href="#" class="menu-link" data-section="reviews"><i class="fas fa-star"></i> Reviews</a></li>
+                    <li><a href="dashboard.php?section=dashboard" class="menu-link active" data-section="dashboard">Dashboard</a></li>
+                    <li><a href="dashboard.php?section=reservations" class="menu-link" data-section="reservations">Manage Reservations</a></li>
+                    <li><a href="dashboard.php?section=booking-records" class="menu-link" data-section="booking-records">Booking Records</a></li>
+                    <li><a href="dashboard.php?section=rooms" class="menu-link" data-section="rooms">Manage Rooms</a></li>
+                    <li><a href="dashboard.php?section=cottages" class="menu-link" data-section="cottages">Manage Cottages</a></li>
+                    <li><a href="dashboard.php?section=pools" class="menu-link" data-section="pools">Manage Pools</a></li>
+                    <li><a href="dashboard.php?section=foods" class="menu-link" data-section="foods">Manage Food</a></li>
+                    <li><a href="dashboard.php?section=reports" class="menu-link" data-section="reports">Reports</a></li>
+                    <li><a href="dashboard.php?section=reviews" class="menu-link" data-section="reviews">Reviews</a></li>
                 </ul>
             </aside>
 
@@ -1046,29 +1532,53 @@ $reviews = $reviewsResult->fetch_all(MYSQLI_ASSOC);
                     </div>
 
                     <div class="table-container">
-                        <h3 style="color: var(--primary-blue); margin-bottom: 1rem;">Recent Bookings</h3>
-                        <table>
-                            <thead>
-                                <tr>
-                                    <th>Guest Name</th>
-                                    <th>Room</th>
-                                    <th>Check-in</th>
-                                    <th>Check-out</th>
-                                    <th>Total Amount</th>
-                                </tr>
-                            </thead>
-                            <tbody>
-                                <?php foreach ($recentReservations as $reservation): ?>
-                                <tr>
-                                    <td><?php echo htmlspecialchars($reservation['name']); ?></td>
-                                    <td><?php echo htmlspecialchars($reservation['items']); ?></td>
-                                    <td><?php echo date('M d, Y', strtotime($reservation['check_in'])); ?></td>
-                                    <td><?php echo date('M d, Y', strtotime($reservation['check_out'])); ?></td>
-                                    <td>₱<?php echo number_format($reservation['total_amount'], 2); ?></td>
-                                </tr>
-                                <?php endforeach; ?>
-                            </tbody>
-                        </table>
+                        <div style="display:flex; justify-content:space-between; align-items:center; gap:1rem; flex-wrap:wrap; margin-bottom:1rem;">
+                            <h3 style="color: var(--primary-blue); margin:0;">Activity Log History</h3>
+                        </div>
+                        <form method="get" style="display:grid; grid-template-columns:repeat(auto-fit, minmax(150px, 1fr)); gap:0.75rem; margin-bottom:1.25rem; align-items:end;">
+                            <input type="hidden" name="section" value="dashboard">
+                            <label style="font-size:0.8rem; color:var(--text-light);">Action
+                                <select name="activity_action" style="width:100%; padding:0.55rem; border:1px solid var(--border-gray); border-radius:6px; margin-top:0.25rem;">
+                                    <option value="">All actions</option>
+                                    <?php foreach (['login' => 'Login', 'logout' => 'Logout', 'reservation_created' => 'Reservation created', 'reservation_cancelled' => 'Reservation cancelled'] as $actionValue => $actionLabel): ?>
+                                        <option value="<?php echo $actionValue; ?>" <?php echo $activityAction === $actionValue ? 'selected' : ''; ?>><?php echo $actionLabel; ?></option>
+                                    <?php endforeach; ?>
+                                </select>
+                            </label>
+                            <label style="font-size:0.8rem; color:var(--text-light);">User
+                                <select name="activity_user_id" style="width:100%; padding:0.55rem; border:1px solid var(--border-gray); border-radius:6px; margin-top:0.25rem;">
+                                    <option value="0">All users</option>
+                                    <?php foreach ($activityUsers as $activityUser): ?>
+                                        <option value="<?php echo (int)$activityUser['id']; ?>" <?php echo $activityUserId === (int)$activityUser['id'] ? 'selected' : ''; ?>><?php echo htmlspecialchars($activityUser['fullname'] ?: $activityUser['email']); ?></option>
+                                    <?php endforeach; ?>
+                                </select>
+                            </label>
+                            <label style="font-size:0.8rem; color:var(--text-light);">From
+                                <input type="date" name="activity_from" value="<?php echo htmlspecialchars($activityFrom); ?>" style="width:100%; padding:0.5rem; border:1px solid var(--border-gray); border-radius:6px; margin-top:0.25rem;">
+                            </label>
+                            <label style="font-size:0.8rem; color:var(--text-light);">To
+                                <input type="date" name="activity_to" value="<?php echo htmlspecialchars($activityTo); ?>" style="width:100%; padding:0.5rem; border:1px solid var(--border-gray); border-radius:6px; margin-top:0.25rem;">
+                            </label>
+                            <button type="submit" class="btn-primary" style="padding:0.6rem 1rem;">Filter</button>
+                            <a href="dashboard.php?section=dashboard" class="btn-small" style="text-align:center; text-decoration:none; padding:0.6rem 1rem;">Clear</a>
+                        </form>
+                        <div style="overflow-x:auto;">
+                            <table>
+                                <thead><tr><th>Date &amp; Time</th><th>User</th><th>Action</th><th>Activity</th></tr></thead>
+                                <tbody>
+                                    <?php if (empty($activityLog)): ?>
+                                        <tr><td colspan="4" style="text-align:center; color:var(--text-light);">No activity found for the selected filters.</td></tr>
+                                    <?php else: foreach ($activityLog as $activity): ?>
+                                        <tr>
+                                            <td><?php echo date('M d, Y H:i', strtotime($activity['created_at'])); ?></td>
+                                            <td><?php echo htmlspecialchars($activity['user_name']); ?></td>
+                                            <td><span style="background:#e0e7ff; color:#3730a3; border-radius:999px; padding:0.25rem 0.55rem; font-size:0.78rem; font-weight:700;"><?php echo htmlspecialchars(ucwords(str_replace('_', ' ', $activity['action']))); ?></span></td>
+                                            <td><?php echo htmlspecialchars($activity['description']); ?></td>
+                                        </tr>
+                                    <?php endforeach; endif; ?>
+                                </tbody>
+                            </table>
+                        </div>
                     </div>
                 </div>
 
@@ -1091,6 +1601,7 @@ $reviews = $reviewsResult->fetch_all(MYSQLI_ASSOC);
                         </div>
                         <?php endif; ?>
                         
+                        <button class="btn-primary" type="button" onclick="openArchiveModal('rooms')" style="background: var(--primary-blue);"><i class="fas fa-box-archive"></i> View Archived</button>
                         <button class="btn-primary" onclick="openDateModal()" style="background: var(--primary-blue);"><i class="fas fa-calendar"></i> Check Availability</button>
                         <?php if (!empty($editingRoom)): ?>
                             <a href="dashboard.php?section=rooms" class="btn-small btn-delete" style="text-decoration:none;">Cancel Edit</a>
@@ -1172,16 +1683,14 @@ $reviews = $reviewsResult->fetch_all(MYSQLI_ASSOC);
                                 <?php echo $availability['remaining']; ?>
                             </div>
                         </div>
-                        <?php else: ?>
-                        <button class="btn-small" style="background: #374151; color: white; border: none; padding: 0.75rem 2rem; border-radius: 8px; cursor: pointer; font-weight: 600; margin-bottom: 1rem;" onclick="openEditRoomModal(<?php echo (int)$room['id']; ?>, '<?php echo str_replace("'", "\\'", htmlspecialchars($room['name'] ?? '', ENT_QUOTES)); ?>', <?php echo (int)($room['capacity'] ?? 0); ?>, <?php echo (float)($room['price_per_night'] ?? 0); ?>, <?php echo (int)($room['daily_slots'] ?? 1); ?>, '<?php echo str_replace("'", "\\'", htmlspecialchars($room['image_url'] ?? '', ENT_QUOTES)); ?>', '<?php echo str_replace("'", "\\'", htmlspecialchars($room['description'] ?? '', ENT_QUOTES)); ?>', <?php echo !empty($room['available']) ? 'true' : 'false'; ?>)">View</button>
                         <?php endif; ?>
                         
                         <div style="display: flex; gap: 0.5rem; justify-content: center;">
-                            <button class="btn-small btn-edit" onclick="openEditRoomModal(<?php echo (int)$room['id']; ?>, '<?php echo str_replace("'", "\\'", htmlspecialchars($room['name'] ?? '', ENT_QUOTES)); ?>', <?php echo (int)($room['capacity'] ?? 0); ?>, <?php echo (float)($room['price_per_night'] ?? 0); ?>, <?php echo (int)($room['daily_slots'] ?? 1); ?>, '<?php echo str_replace("'", "\\'", htmlspecialchars($room['image_url'] ?? '', ENT_QUOTES)); ?>', '<?php echo str_replace("'", "\\'", htmlspecialchars($room['description'] ?? '', ENT_QUOTES)); ?>', <?php echo !empty($room['available']) ? 'true' : 'false'; ?>)">Edit</button>
-                            <form method="post" action="dashboard.php?section=rooms" style="display:inline-block;" onsubmit="return confirm('Delete this room?');">
+                            <button class="btn-small btn-edit" onclick="openEditRoomModal(<?php echo (int)$room['id']; ?>, '<?php echo str_replace("'", "\\'", htmlspecialchars($room['name'] ?? '', ENT_QUOTES)); ?>', <?php echo (int)($room['capacity'] ?? 0); ?>, <?php echo (float)($room['price_per_night'] ?? 0); ?>, <?php echo (int)($room['day_slots'] ?? $room['daily_slots'] ?? 1); ?>, <?php echo (int)($room['night_slots'] ?? $room['daily_slots'] ?? 1); ?>, '<?php echo str_replace("'", "\\'", htmlspecialchars($room['image_url'] ?? '', ENT_QUOTES)); ?>', '<?php echo str_replace("'", "\\'", htmlspecialchars($room['description'] ?? '', ENT_QUOTES)); ?>', <?php echo !empty($room['available']) ? 'true' : 'false'; ?>)">Edit</button>
+                            <form method="post" action="dashboard.php?section=rooms" style="display:inline-block;" data-delete-form="room" onsubmit="event.preventDefault(); openDeleteConfirmModal(this);">
                                 <input type="hidden" name="room_action" value="delete_room">
                                 <input type="hidden" name="room_id" value="<?php echo (int)$room['id']; ?>">
-                                <button type="submit" class="btn-small btn-delete">Delete</button>
+                                <button type="submit" class="btn-small btn-delete">Archive</button>
                             </form>
                         </div>
                     </div>
@@ -1211,9 +1720,14 @@ $reviews = $reviewsResult->fetch_all(MYSQLI_ASSOC);
                                         <input type="number" step="0.01" name="room_price" min="0" value="0" required style="width:100%; padding:0.7rem; border:1px solid var(--border-gray); border-radius:6px;">
                                     </div>
                                     <div>
-                                        <label style="display:block; margin-bottom:0.35rem; font-weight:600;">Daily Slots</label>
-                                        <input type="number" name="room_slots" min="1" value="1" required style="width:100%; padding:0.7rem; border:1px solid var(--border-gray); border-radius:6px;">
-                                        <small style="color: var(--text-light); font-size: 0.8rem;">Maximum bookings per day</small>
+                                        <label style="display:block; margin-bottom:0.35rem; font-weight:600;">Day Tour Slots</label>
+                                        <input type="number" name="room_day_slots" min="1" value="1" required style="width:100%; padding:0.7rem; border:1px solid var(--border-gray); border-radius:6px;">
+                                        <small style="color: var(--text-light); font-size: 0.8rem;">Maximum day-tour bookings</small>
+                                    </div>
+                                    <div>
+                                        <label style="display:block; margin-bottom:0.35rem; font-weight:600;">Night Tour Slots</label>
+                                        <input type="number" name="room_night_slots" min="1" value="1" required style="width:100%; padding:0.7rem; border:1px solid var(--border-gray); border-radius:6px;">
+                                        <small style="color: var(--text-light); font-size: 0.8rem;">Maximum night-tour bookings</small>
                                     </div>
                                     <div>
                                         <label style="display:block; margin-bottom:0.35rem; font-weight:600;">Upload Image</label>
@@ -1262,13 +1776,23 @@ $reviews = $reviewsResult->fetch_all(MYSQLI_ASSOC);
                                         <input type="number" step="0.01" name="room_price" id="editRoomPrice" min="0" value="0" required style="width:100%; padding:0.7rem; border:1px solid var(--border-gray); border-radius:6px;">
                                     </div>
                                     <div>
-                                        <label style="display:block; margin-bottom:0.35rem; font-weight:600;">Daily Slots</label>
-                                        <input type="number" name="room_slots" id="editRoomSlots" min="1" value="1" required style="width:100%; padding:0.7rem; border:1px solid var(--border-gray); border-radius:6px;">
-                                        <small style="color: var(--text-light); font-size: 0.8rem;">Maximum bookings per day</small>
+                                        <label style="display:block; margin-bottom:0.35rem; font-weight:600;">Day Tour Slots</label>
+                                        <input type="number" name="room_day_slots" id="editRoomDaySlots" min="1" value="1" required style="width:100%; padding:0.7rem; border:1px solid var(--border-gray); border-radius:6px;">
+                                        <small style="color: var(--text-light); font-size: 0.8rem;">Maximum day-tour bookings</small>
+                                    </div>
+                                    <div>
+                                        <label style="display:block; margin-bottom:0.35rem; font-weight:600;">Night Tour Slots</label>
+                                        <input type="number" name="room_night_slots" id="editRoomNightSlots" min="1" value="1" required style="width:100%; padding:0.7rem; border:1px solid var(--border-gray); border-radius:6px;">
+                                        <small style="color: var(--text-light); font-size: 0.8rem;">Maximum night-tour bookings</small>
                                     </div>
                                     <div>
                                         <label style="display:block; margin-bottom:0.35rem; font-weight:600;">Upload New Image (optional)</label>
                                         <input type="file" name="room_image" id="editRoomImage" accept="image/*" style="width:100%; padding:0.7rem; border:1px solid var(--border-gray); border-radius:6px;">
+                                    </div>
+                                    <div style="grid-column: 1 / -1;">
+                                        <label style="display:block; margin-bottom:0.35rem; font-weight:600;">Add Images to Room Album</label>
+                                        <input type="file" name="room_images[]" id="editRoomGallery" accept="image/jpeg,image/png,image/webp,image/gif" multiple style="width:100%; padding:0.7rem; border:1px solid var(--border-gray); border-radius:6px;">
+                                        <small style="color: var(--text-light); font-size: 0.8rem;">Select multiple images. Maximum 8 MB per image.</small>
                                     </div>
                                     <div style="grid-column: 1 / -1;">
                                         <label style="display:block; margin-bottom:0.35rem; font-weight:600;">Description</label>
@@ -1291,7 +1815,7 @@ $reviews = $reviewsResult->fetch_all(MYSQLI_ASSOC);
                 </div>
 
                 <!-- View Bookings Section -->
-                <div id="bookings" class="admin-section">
+                <div id="bookings" class="admin-section" style="display: none;">
                     <h2 class="section-title"><i class="fas fa-calendar-check"></i> All Bookings</h2>
                     
                     <div class="table-container">
@@ -1587,26 +2111,18 @@ $reviews = $reviewsResult->fetch_all(MYSQLI_ASSOC);
                     <h2 class="section-title"><i class="fas fa-calendar-check"></i> Manage Reservations</h2>
                     <p style="color: var(--text-light); margin-bottom: 1.5rem;">View, approve, update, or cancel customer reservations for rooms and resort facilities.</p>
                     
-                    <div class="filter-controls" style="margin-bottom: 1.5rem; display: flex; gap: 1rem; flex-wrap: wrap; align-items: center;">
-                        <select id="reservationFilter" style="padding: 0.7rem; border: 1px solid var(--border-gray); border-radius: 6px; background: white; font-size: 0.95rem;">
-                            <option value="all">All Reservations</option>
-                            <option value="pending">Pending</option>
-                            <option value="approved">Approved</option>
-                            <option value="cancelled">Cancelled</option>
-                        </select>
-                        <input type="text" id="searchReservations" placeholder="Search by guest name or ID..." style="padding: 0.7rem; border: 1px solid var(--border-gray); border-radius: 6px; font-size: 0.95rem; min-width: 250px;">
-                    </div>
-                    
                     <div class="table-container">
                         <table>
                             <thead>
                                 <tr>
                                     <th>Reservation ID</th>
                                     <th>Guest Name</th>
+                                    <th>Contact Number</th>
                                     <th>Items Booked</th>
                                     <th>Check-in</th>
                                     <th>Check-out</th>
                                     <th>Total Amount</th>
+                                    <th>Guests</th>
                                     <th>Status</th>
                                     <th>Actions</th>
                                 </tr>
@@ -1616,16 +2132,25 @@ $reviews = $reviewsResult->fetch_all(MYSQLI_ASSOC);
                                 <tr>
                                     <td>#<?php echo $reservation['id']; ?></td>
                                     <td><?php echo htmlspecialchars($reservation['name']); ?></td>
+                                    <td><?php echo htmlspecialchars(trim((string)($reservation['guest_phone'] ?? '')) !== '' ? $reservation['guest_phone'] : 'N/A'); ?></td>
                                     <td><?php echo htmlspecialchars($reservation['items']); ?></td>
                                     <td><?php echo date('M d, Y', strtotime($reservation['check_in'])); ?></td>
                                     <td><?php echo date('M d, Y', strtotime($reservation['check_out'])); ?></td>
                                     <td>₱<?php echo number_format($reservation['total_amount'], 2); ?></td>
+                                    <td>
+                                        <strong><?php echo ($reservation['adults'] ?? 0) + ($reservation['children'] ?? 0); ?></strong>
+                                        <small style="color: var(--text-light); display: block;">
+                                            <?php echo ($reservation['adults'] ?? 0); ?> adults, <?php echo ($reservation['children'] ?? 0); ?> children
+                                        </small>
+                                    </td>
                                     <?php $reservationStatus = empty($reservation['status']) ? 'pending' : $reservation['status']; ?>
                                     <td><span class="status-badge status-<?php echo strtolower(htmlspecialchars($reservationStatus)); ?>"><?php echo ucfirst(htmlspecialchars($reservationStatus)); ?></span></td>
                                     <td>
                                         <?php if ($reservationStatus === 'pending'): ?>
-                                        <button class="btn-small btn-approve" onclick="updateReservationStatus(<?php echo $reservation['id']; ?>, 'approved')">Approve</button>
-                                        <button class="btn-small btn-reject" onclick="updateReservationStatus(<?php echo $reservation['id']; ?>, 'cancelled')">Cancel</button>
+                                        <div style="display:flex; align-items:center; justify-content:center; gap:0.5rem; flex-wrap:nowrap; white-space:nowrap;">
+                                            <button class="btn-small btn-approve" onclick="openApproveReservationModal(<?php echo (int)$reservation['id']; ?>)">Approve</button>
+                                            <button class="btn-small btn-reject" onclick="openCancelReservationModal(<?php echo (int)$reservation['id']; ?>)">Cancel</button>
+                                        </div>
                                         <?php endif; ?>
                                     </td>
                                 </tr>
@@ -1690,6 +2215,7 @@ $reviews = $reviewsResult->fetch_all(MYSQLI_ASSOC);
                         </div>
                         <?php endif; ?>
                         
+                        <button class="btn-primary" type="button" onclick="openArchiveModal('cottages')" style="background: var(--primary-blue);"><i class="fas fa-box-archive"></i> View Archived</button>
                         <button class="btn-primary" onclick="openDateModal()" style="background: var(--primary-blue);"><i class="fas fa-calendar"></i> Check Availability</button>
                         <?php if (!empty($editingCottage)): ?>
                             <a href="dashboard.php?section=cottages" class="btn-small btn-delete" style="text-decoration:none;">Cancel Edit</a>
@@ -1771,16 +2297,14 @@ $reviews = $reviewsResult->fetch_all(MYSQLI_ASSOC);
                                 <?php echo $availability['remaining']; ?>
                             </div>
                         </div>
-                        <?php else: ?>
-                        <button class="btn-small" style="background: #374151; color: white; border: none; padding: 0.75rem 2rem; border-radius: 8px; cursor: pointer; font-weight: 600; margin-bottom: 1rem;" onclick="openEditCottageModal(<?php echo (int)$cottage['id']; ?>, '<?php echo str_replace("'", "\\'", htmlspecialchars($cottage['name'] ?? '', ENT_QUOTES)); ?>', <?php echo (int)($cottage['capacity'] ?? 0); ?>, <?php echo (float)($cottage['price_per_night'] ?? 0); ?>, <?php echo (int)($cottage['daily_slots'] ?? 1); ?>, '<?php echo str_replace("'", "\\'", htmlspecialchars($cottage['image_url'] ?? '', ENT_QUOTES)); ?>', '<?php echo str_replace("'", "\\'", htmlspecialchars($cottage['description'] ?? '', ENT_QUOTES)); ?>', <?php echo !empty($cottage['available']) ? 'true' : 'false'; ?>)">View</button>
                         <?php endif; ?>
                         
                         <div style="display: flex; gap: 0.5rem; justify-content: center;">
-                            <button class="btn-small btn-edit" onclick="openEditCottageModal(<?php echo (int)$cottage['id']; ?>, '<?php echo str_replace("'", "\\'", htmlspecialchars($cottage['name'] ?? '', ENT_QUOTES)); ?>', <?php echo (int)($cottage['capacity'] ?? 0); ?>, <?php echo (float)($cottage['price_per_night'] ?? 0); ?>, <?php echo (int)($cottage['daily_slots'] ?? 1); ?>, '<?php echo str_replace("'", "\\'", htmlspecialchars($cottage['image_url'] ?? '', ENT_QUOTES)); ?>', '<?php echo str_replace("'", "\\'", htmlspecialchars($cottage['description'] ?? '', ENT_QUOTES)); ?>', <?php echo !empty($cottage['available']) ? 'true' : 'false'; ?>)">Edit</button>
-                            <form method="post" action="dashboard.php?section=cottages" style="display:inline-block;" onsubmit="return confirm('Delete this cottage?');">
+                            <button class="btn-small btn-edit" onclick="openEditCottageModal(<?php echo (int)$cottage['id']; ?>, '<?php echo str_replace("'", "\\'", htmlspecialchars($cottage['name'] ?? '', ENT_QUOTES)); ?>', <?php echo (int)($cottage['capacity'] ?? 0); ?>, <?php echo (float)($cottage['price_per_night'] ?? 0); ?>, <?php echo (int)($cottage['day_slots'] ?? $cottage['daily_slots'] ?? 1); ?>, <?php echo (int)($cottage['night_slots'] ?? $cottage['daily_slots'] ?? 1); ?>, '<?php echo str_replace("'", "\\'", htmlspecialchars($cottage['image_url'] ?? '', ENT_QUOTES)); ?>', '<?php echo str_replace("'", "\\'", htmlspecialchars($cottage['description'] ?? '', ENT_QUOTES)); ?>', <?php echo !empty($cottage['available']) ? 'true' : 'false'; ?>)">Edit</button>
+                            <form method="post" action="dashboard.php?section=cottages" style="display:inline-block;" data-delete-form="cottage" onsubmit="event.preventDefault(); openDeleteConfirmModal(this);">
                                 <input type="hidden" name="cottage_action" value="delete_cottage">
                                 <input type="hidden" name="cottage_id" value="<?php echo (int)$cottage['id']; ?>">
-                                <button type="submit" class="btn-small btn-delete">Delete</button>
+                                <button type="submit" class="btn-small btn-delete">Archive</button>
                             </form>
                         </div>
                     </div>
@@ -1810,9 +2334,14 @@ $reviews = $reviewsResult->fetch_all(MYSQLI_ASSOC);
                                         <input type="number" step="0.01" name="cottage_price" min="0" value="0" required style="width:100%; padding:0.7rem; border:1px solid var(--border-gray); border-radius:6px;">
                                     </div>
                                     <div>
-                                        <label style="display:block; margin-bottom:0.35rem; font-weight:600;">Daily Slots</label>
-                                        <input type="number" name="cottage_slots" min="1" value="1" required style="width:100%; padding:0.7rem; border:1px solid var(--border-gray); border-radius:6px;">
-                                        <small style="color: var(--text-light); font-size: 0.8rem;">Maximum bookings per day</small>
+                                        <label style="display:block; margin-bottom:0.35rem; font-weight:600;">Day Tour Slots</label>
+                                        <input type="number" name="cottage_day_slots" min="1" value="1" required style="width:100%; padding:0.7rem; border:1px solid var(--border-gray); border-radius:6px;">
+                                        <small style="color: var(--text-light); font-size: 0.8rem;">Maximum day-tour bookings</small>
+                                    </div>
+                                    <div>
+                                        <label style="display:block; margin-bottom:0.35rem; font-weight:600;">Night Tour Slots</label>
+                                        <input type="number" name="cottage_night_slots" min="1" value="1" required style="width:100%; padding:0.7rem; border:1px solid var(--border-gray); border-radius:6px;">
+                                        <small style="color: var(--text-light); font-size: 0.8rem;">Maximum night-tour bookings</small>
                                     </div>
                                     <div>
                                         <label style="display:block; margin-bottom:0.35rem; font-weight:600;">Upload Image</label>
@@ -1861,13 +2390,23 @@ $reviews = $reviewsResult->fetch_all(MYSQLI_ASSOC);
                                         <input type="number" step="0.01" name="cottage_price" id="editCottagePrice" min="0" value="0" required style="width:100%; padding:0.7rem; border:1px solid var(--border-gray); border-radius:6px;">
                                     </div>
                                     <div>
-                                        <label style="display:block; margin-bottom:0.35rem; font-weight:600;">Daily Slots</label>
-                                        <input type="number" name="cottage_slots" id="editCottageSlots" min="1" value="1" required style="width:100%; padding:0.7rem; border:1px solid var(--border-gray); border-radius:6px;">
-                                        <small style="color: var(--text-light); font-size: 0.8rem;">Maximum bookings per day</small>
+                                        <label style="display:block; margin-bottom:0.35rem; font-weight:600;">Day Tour Slots</label>
+                                        <input type="number" name="cottage_day_slots" id="editCottageDaySlots" min="1" value="1" required style="width:100%; padding:0.7rem; border:1px solid var(--border-gray); border-radius:6px;">
+                                        <small style="color: var(--text-light); font-size: 0.8rem;">Maximum day-tour bookings</small>
+                                    </div>
+                                    <div>
+                                        <label style="display:block; margin-bottom:0.35rem; font-weight:600;">Night Tour Slots</label>
+                                        <input type="number" name="cottage_night_slots" id="editCottageNightSlots" min="1" value="1" required style="width:100%; padding:0.7rem; border:1px solid var(--border-gray); border-radius:6px;">
+                                        <small style="color: var(--text-light); font-size: 0.8rem;">Maximum night-tour bookings</small>
                                     </div>
                                     <div>
                                         <label style="display:block; margin-bottom:0.35rem; font-weight:600;">Upload New Image (optional)</label>
                                         <input type="file" name="cottage_image" id="editCottageImage" accept="image/*" style="width:100%; padding:0.7rem; border:1px solid var(--border-gray); border-radius:6px;">
+                                    </div>
+                                    <div style="grid-column: 1 / -1;">
+                                        <label style="display:block; margin-bottom:0.35rem; font-weight:600;">Add Images to Cottage Album</label>
+                                        <input type="file" name="cottage_images[]" id="editCottageGallery" accept="image/jpeg,image/png,image/webp,image/gif" multiple style="width:100%; padding:0.7rem; border:1px solid var(--border-gray); border-radius:6px;">
+                                        <small style="color: var(--text-light); font-size: 0.8rem;">Select multiple images. Maximum 8 MB per image.</small>
                                     </div>
                                     <div style="grid-column: 1 / -1;">
                                         <label style="display:block; margin-bottom:0.35rem; font-weight:600;">Description</label>
@@ -1896,6 +2435,7 @@ $reviews = $reviewsResult->fetch_all(MYSQLI_ASSOC);
 
                     <div style="display:flex; justify-content:space-between; align-items:center; gap:1rem; margin-bottom: 1.5rem; flex-wrap:wrap;">
                         <button class="btn-primary" onclick="openAddPoolModal()"><i class="fas fa-plus"></i> Add New Pool</button>
+                        <button class="btn-primary" type="button" onclick="openArchiveModal('pools')" style="background: var(--primary-blue);"><i class="fas fa-box-archive"></i> View Archived</button>
                         <?php if (!empty($editingPool)): ?>
                             <a href="dashboard.php?section=pools" class="btn-small btn-delete" style="text-decoration:none;">Cancel Edit</a>
                         <?php endif; ?>
@@ -2010,24 +2550,49 @@ $reviews = $reviewsResult->fetch_all(MYSQLI_ASSOC);
                         </div>
                     </div>
 
+                    <div class="pools-container" style="display: grid; grid-template-columns: repeat(auto-fill, minmax(280px, 1fr)); gap: 1.5rem;">
                     <?php foreach ($pools as $pool): ?>
-                    <div class="pool-card">
-                        <div class="pool-card-header">
-                            <h3><?php echo htmlspecialchars($pool['name'] ?? ''); ?></h3>
-                            <span class="status-badge status-<?php echo htmlspecialchars($pool['status'] ?? 'active'); ?>"><?php echo ucfirst(htmlspecialchars($pool['status'] ?? 'active')); ?></span>
+                    <div class="pool-card" style="background: #f3f4f6; border-radius: 12px; padding: 1.5rem; text-align: center;">
+                        <h3 style="color: var(--primary-blue); margin: 0 0 1rem 0; font-size: 1.2rem;"><?php echo htmlspecialchars($pool['name'] ?? ''); ?></h3>
+
+                        <div style="height: 150px; background: #e5e7eb; border-radius: 8px; display: flex; align-items: center; justify-content: center; margin-bottom: 1rem; overflow: hidden;">
+                            <?php
+                            $imageUrl = $pool['image_url'] ?? '';
+                            if (!empty($imageUrl)):
+                                if (preg_match('/^https?:\/\//i', $imageUrl)) {
+                                    $displayImage = $imageUrl;
+                                } elseif (strpos($imageUrl, '/') === 0) {
+                                    $displayImage = rtrim(SITE_URL, '/') . $imageUrl;
+                                } else {
+                                    $displayImage = SITE_URL . $imageUrl;
+                                }
+                            ?>
+                                <img src="<?php echo htmlspecialchars($displayImage); ?>" alt="<?php echo htmlspecialchars($pool['name']); ?>" style="width: 100%; height: 100%; object-fit: cover;">
+                            <?php else: ?>
+                                <span style="color: #9ca3af; font-size: 0.9rem;">Pool Image</span>
+                            <?php endif; ?>
                         </div>
-                        <p style="color: var(--text-light); margin: 0.5rem 0;"><?php echo htmlspecialchars($pool['description'] ?? ''); ?></p>
-                        <p style="color: var(--text-light); margin: 0.25rem 0 0.75rem; font-size: 0.95rem;">Capacity: <?php echo (int)($pool['capacity'] ?? 0); ?> • Features: <?php echo htmlspecialchars($pool['features'] ?? 'N/A'); ?> • <?php echo !empty($pool['available']) ? 'Available' : 'Unavailable'; ?></p>
-                        <div style="margin-top: 1rem;">
+
+                        <div style="margin-bottom: 1rem;">
+                            <span class="status-badge status-<?php echo htmlspecialchars($pool['status'] ?? 'active'); ?>" style="padding: 0.25rem 0.75rem; border-radius: 12px; font-size: 0.85rem; font-weight: 600;">
+                                <?php echo ucfirst(htmlspecialchars($pool['status'] ?? 'active')); ?>
+                            </span>
+                            <span style="margin-left: 0.5rem; color: #64748b; font-size: 0.85rem;">
+                                <?php echo !empty($pool['available']) ? 'Available' : 'Unavailable'; ?>
+                            </span>
+                        </div>
+
+                        <div style="display: flex; gap: 0.5rem; justify-content: center;">
                             <button class="btn-small btn-edit" onclick="openEditPoolModal(<?php echo (int)$pool['id']; ?>, '<?php echo str_replace("'", "\\'", htmlspecialchars($pool['name'] ?? '', ENT_QUOTES)); ?>', <?php echo (int)($pool['capacity'] ?? 0); ?>, '<?php echo str_replace("'", "\\'", htmlspecialchars($pool['status'] ?? 'active', ENT_QUOTES)); ?>', '<?php echo str_replace("'", "\\'", htmlspecialchars($pool['image_url'] ?? '', ENT_QUOTES)); ?>', '<?php echo str_replace("'", "\\'", htmlspecialchars($pool['description'] ?? '', ENT_QUOTES)); ?>', '<?php echo str_replace("'", "\\'", htmlspecialchars($pool['features'] ?? '', ENT_QUOTES)); ?>', <?php echo !empty($pool['available']) ? 'true' : 'false'; ?>)">Edit</button>
-                            <form method="post" action="dashboard.php?section=pools" style="display:inline-block; margin-left:0.5rem;" onsubmit="return confirm('Delete this pool?');">
+                            <form method="post" action="dashboard.php?section=pools" style="display:inline-block;" data-delete-form="pool" onsubmit="event.preventDefault(); openDeleteConfirmModal(this);">
                                 <input type="hidden" name="pool_action" value="delete_pool">
                                 <input type="hidden" name="pool_id" value="<?php echo (int)$pool['id']; ?>">
-                                <button type="submit" class="btn-small btn-delete">Delete</button>
+                                <button type="submit" class="btn-small btn-delete">Archive</button>
                             </form>
                         </div>
                     </div>
                     <?php endforeach; ?>
+                    </div>
                 </div>
 
                 <!-- Manage Foods Section -->
@@ -2037,14 +2602,26 @@ $reviews = $reviewsResult->fetch_all(MYSQLI_ASSOC);
 
                     <div style="display:flex; justify-content:space-between; align-items:center; gap:1rem; margin-bottom: 1rem; flex-wrap:wrap;">
                         <button class="btn-primary" onclick="openAddFoodModal()"><i class="fas fa-plus"></i> Add New Food</button>
+                            <button class="btn-primary" type="button" onclick="openArchiveModal('foods')" style="background: var(--primary-blue);"><i class="fas fa-box-archive"></i> View Archived</button>
                         <?php if (!empty($errorMessage)): ?>
                             <div style="color:#991b1b;"><?php echo htmlspecialchars($errorMessage); ?></div>
                         <?php endif; ?>
                     </div>
 
-                    <div style="margin-bottom: 1.25rem; max-width: 420px;">
-                        <label for="foodSearchInput" style="display:block; margin-bottom:0.35rem; font-weight:600;">Search Food</label>
-                        <input type="text" id="foodSearchInput" placeholder="Search by name or category" style="width:100%; padding:0.8rem 0.9rem; border:1px solid var(--border-gray); border-radius:6px;">
+                    <!-- Category Tabs -->
+                    <div style="margin-bottom: 1.5rem; display: flex; gap: 0.5rem; flex-wrap: wrap;">
+                        <button class="food-tab btn-primary" data-category="all" onclick="filterFoodByCategory('all')">All</button>
+                        <button class="food-tab" data-category="Starters" onclick="filterFoodByCategory('Starters')">Starters</button>
+                        <button class="food-tab" data-category="Main Course" onclick="filterFoodByCategory('Main Course')">Main Course</button>
+                        <button class="food-tab" data-category="Soups" onclick="filterFoodByCategory('Soups')">Soups</button>
+                        <button class="food-tab" data-category="All Day Breakfast" onclick="filterFoodByCategory('All Day Breakfast')">All Day Breakfast</button>
+                        <button class="food-tab" data-category="Hot Beverages" onclick="filterFoodByCategory('Hot Beverages')">Hot Beverages</button>
+                        <button class="food-tab" data-category="Non-Alcoholic" onclick="filterFoodByCategory('Non-Alcoholic')">Non-Alcoholic</button>
+                        <button class="food-tab" data-category="Sides" onclick="filterFoodByCategory('Sides')">Sides</button>
+                        <button class="food-tab" data-category="Vegetables" onclick="filterFoodByCategory('Vegetables')">Vegetables</button>
+                        <button class="food-tab" data-category="Rice Meals" onclick="filterFoodByCategory('Rice Meals')">Rice Meals</button>
+                        <button class="food-tab" data-category="Dessert" onclick="filterFoodByCategory('Dessert')">Dessert</button>
+                        <button class="food-tab" data-category="Cocktails" onclick="filterFoodByCategory('Cocktails')">Cocktails</button>
                     </div>
 
                     <!-- Add Food Modal -->
@@ -2108,69 +2685,94 @@ $reviews = $reviewsResult->fetch_all(MYSQLI_ASSOC);
                     </div>
 
                     <!-- Foods List -->
-                    <div class="table-container">
-                        <table>
-                            <thead>
-                                <tr>
-                                    <th>ID</th>
-                                    <th>Name</th>
-                                    <th>Category</th>
-                                    <th>Price</th>
-                                    <th>Actions</th>
-                                </tr>
-                            </thead>
-                            <tbody id="foodTableBody">
-                                <?php if (!empty($foods)): ?>
-                                    <?php foreach ($foods as $food): ?>
-                                    <tr class="food-table-row" data-search="<?php echo htmlspecialchars(strtolower(($food['name'] ?? '') . ' ' . ($food['category'] ?? '') . ' ' . ($food['description'] ?? ''))); ?>">
-                                        <td><?php echo (int)$food['id']; ?></td>
-                                        <td><?php echo htmlspecialchars($food['name']); ?></td>
-                                        <td><?php echo htmlspecialchars($food['category']); ?></td>
-                                        <td>₱<?php echo number_format((float)$food['price'], 2); ?></td>
-                                        <td>
-                                            <button class="btn-small btn-edit" onclick="openEditFoodModal(<?php echo (int)$food['id']; ?>, '<?php echo str_replace("'", "\\'", htmlspecialchars($food['name'], ENT_QUOTES)); ?>', '<?php echo str_replace("'", "\\'", htmlspecialchars($food['category'], ENT_QUOTES)); ?>', <?php echo (float)$food['price']; ?>, '<?php echo str_replace("'", "\\'", htmlspecialchars($food['status'] ?? 'active', ENT_QUOTES)); ?>', '<?php echo str_replace("'", "\\'", htmlspecialchars($food['image_url'] ?? '', ENT_QUOTES)); ?>', <?php echo !empty($food['available']) ? 'true' : 'false'; ?>, '<?php echo str_replace("'", "\\'", htmlspecialchars($food['description'] ?? '', ENT_QUOTES)); ?>')">Edit</button>
-                                            <form method="post" action="dashboard.php?section=foods" style="display:inline-block; margin-left:0.5rem;" onsubmit="return confirm('Delete this food item?');">
-                                                <input type="hidden" name="food_action" value="delete_food">
-                                                <input type="hidden" name="food_id" value="<?php echo (int)$food['id']; ?>">
-                                                <button type="submit" class="btn-small btn-delete">Delete</button>
-                                            </form>
-                                        </td>
-                                    </tr>
-                                    <?php endforeach; ?>
-                                <?php else: ?>
-                                    <tr><td colspan="5" style="text-align:center; color:var(--text-light); padding:1.5rem;">No food items yet.</td></tr>
-                                <?php endif; ?>
-                                <tr id="foodNoResultsRow" style="display:none;"><td colspan="5" style="text-align:center; color:var(--text-light); padding:1.5rem;">No food items matched your search.</td></tr>
-                            </tbody>
-                        </table>
+                    <div class="foods-container" style="display: grid; grid-template-columns: repeat(auto-fill, minmax(280px, 1fr)); gap: 1.5rem;">
+                        <?php if (!empty($foods)): ?>
+                            <?php foreach ($foods as $food): ?>
+                            <div class="food-card food-table-row" data-search="<?php echo htmlspecialchars(strtolower(($food['name'] ?? '') . ' ' . ($food['category'] ?? '') . ' ' . ($food['description'] ?? ''))); ?>" data-category="<?php echo htmlspecialchars($food['category'] ?? ''); ?>" style="background: #f3f4f6; border-radius: 12px; padding: 1.5rem; text-align: center;">
+                                <h3 style="color: var(--primary-blue); margin: 0 0 0.5rem 0; font-size: 1.1rem;"><?php echo htmlspecialchars($food['name'] ?? ''); ?></h3>
+                                <p style="color: #64748b; font-size: 0.85rem; margin: 0 0 1rem 0;"><?php echo htmlspecialchars($food['category'] ?? ''); ?></p>
+
+                                <div style="height: 150px; background: #e5e7eb; border-radius: 8px; display: flex; align-items: center; justify-content: center; margin-bottom: 1rem; overflow: hidden;">
+                                    <?php
+                                    $imageUrl = $food['image_url'] ?? '';
+                                    if (!empty($imageUrl)):
+                                        if (preg_match('/^https?:\/\//i', $imageUrl)) {
+                                            $displayImage = $imageUrl;
+                                        } elseif (strpos($imageUrl, '/') === 0) {
+                                            $displayImage = rtrim(SITE_URL, '/') . $imageUrl;
+                                        } else {
+                                            $displayImage = SITE_URL . $imageUrl;
+                                        }
+                                    ?>
+                                        <img src="<?php echo htmlspecialchars($displayImage); ?>" alt="<?php echo htmlspecialchars($food['name']); ?>" style="width: 100%; height: 100%; object-fit: cover;">
+                                    <?php else: ?>
+                                        <span style="color: #9ca3af; font-size: 0.9rem;">Food Image</span>
+                                    <?php endif; ?>
+                                </div>
+
+                                <div style="background: white; padding: 0.75rem; border-radius: 8px; margin-bottom: 1rem;">
+                                    <div style="font-size: 1.25rem; font-weight: 700; color: var(--primary-blue);">
+                                        ₱<?php echo number_format((float)$food['price'], 2); ?>
+                                    </div>
+                                </div>
+
+                                <div style="display: flex; gap: 0.5rem; justify-content: center;">
+                                    <button class="btn-small btn-edit" onclick="openEditFoodModal(<?php echo (int)$food['id']; ?>, '<?php echo str_replace("'", "\\'", htmlspecialchars($food['name'], ENT_QUOTES)); ?>', '<?php echo str_replace("'", "\\'", htmlspecialchars($food['category'], ENT_QUOTES)); ?>', <?php echo (float)$food['price']; ?>, '<?php echo str_replace("'", "\\'", htmlspecialchars($food['status'] ?? 'active', ENT_QUOTES)); ?>', '<?php echo str_replace("'", "\\'", htmlspecialchars($food['image_url'] ?? '', ENT_QUOTES)); ?>', <?php echo !empty($food['available']) ? 'true' : 'false'; ?>, '<?php echo str_replace("'", "\\'", htmlspecialchars($food['description'] ?? '', ENT_QUOTES)); ?>')">Edit</button>
+                                    <form method="post" action="dashboard.php?section=foods" style="display:inline-block;" data-delete-form="food" onsubmit="event.preventDefault(); openDeleteConfirmModal(this);">
+                                        <input type="hidden" name="food_action" value="delete_food">
+                                        <input type="hidden" name="food_id" value="<?php echo (int)$food['id']; ?>">
+                                        <button type="submit" class="btn-small btn-delete">Archive</button>
+                                    </form>
+                                </div>
+                            </div>
+                            <?php endforeach; ?>
+                        <?php else: ?>
+                            <div style="grid-column: 1 / -1; text-align: center; color: var(--text-light); padding: 1.5rem;">No food items yet.</div>
+                        <?php endif; ?>
+                        <div id="foodNoResultsRow" style="display:none; grid-column: 1 / -1; text-align:center; color:var(--text-light); padding:1.5rem;">No food items matched your search.</div>
                     </div>
                 </div>
 
                 <script>
-                document.addEventListener('DOMContentLoaded', function () {
-                    const searchInput = document.getElementById('foodSearchInput');
-                    if (!searchInput) return;
+                let currentCategory = 'all';
+                let foodRows = [];
+                let foodEmptyRow = null;
 
-                    const rows = Array.from(document.querySelectorAll('.food-table-row'));
-                    const emptyRow = document.getElementById('foodNoResultsRow');
+                window.filterFoodByCategory = function(category) {
+                    currentCategory = category;
 
-                    function filterFoodRows() {
-                        const term = searchInput.value.trim().toLowerCase();
-                        let visibleCount = 0;
-
-                        rows.forEach(function (row) {
-                            const haystack = row.getAttribute('data-search') || '';
-                            const matches = haystack.includes(term);
-                            row.style.display = matches ? '' : 'none';
-                            if (matches) visibleCount++;
-                        });
-
-                        if (emptyRow) {
-                            emptyRow.style.display = visibleCount === 0 ? '' : 'none';
+                    // Update tab styling
+                    document.querySelectorAll('.food-tab').forEach(tab => {
+                        if (tab.dataset.category === category) {
+                            tab.classList.add('btn-primary');
+                        } else {
+                            tab.classList.remove('btn-primary');
                         }
-                    }
+                    });
 
-                    searchInput.addEventListener('input', filterFoodRows);
+                    // Apply filter
+                    filterFoodRows();
+                };
+
+                function filterFoodRows() {
+                    let visibleCount = 0;
+
+                    foodRows.forEach(function (row) {
+                        const category = row.getAttribute('data-category') || '';
+                        const matchesCategory = currentCategory === 'all' || category === currentCategory;
+
+                        row.style.display = matchesCategory ? '' : 'none';
+                        if (matchesCategory) visibleCount++;
+                    });
+
+                    if (foodEmptyRow) {
+                        foodEmptyRow.style.display = visibleCount === 0 ? '' : 'none';
+                    }
+                }
+
+                document.addEventListener('DOMContentLoaded', function () {
+                    foodRows = Array.from(document.querySelectorAll('.food-table-row'));
+                    foodEmptyRow = document.getElementById('foodNoResultsRow');
                     filterFoodRows();
                 });
                 </script>
@@ -2252,16 +2854,35 @@ $reviews = $reviewsResult->fetch_all(MYSQLI_ASSOC);
                         <select id="reportType" style="padding: 0.7rem; border: 1px solid var(--border-gray); border-radius: 6px; background: white; font-size: 0.95rem;">
                             <option value="revenue">Revenue Report</option>
                             <option value="customer">Customer Analytics</option>
+                            <option value="maintenance">Maintenance</option>
                         </select>
                         <input type="date" id="reportStartDate" style="padding: 0.7rem; border: 1px solid var(--border-gray); border-radius: 6px; font-size: 0.95rem;">
                         <input type="date" id="reportEndDate" style="padding: 0.7rem; border: 1px solid var(--border-gray); border-radius: 6px; font-size: 0.95rem;">
                         <button class="btn-primary" onclick="generateReport()"><i class="fas fa-sync-alt"></i> Generate Report</button>
-                        <button class="btn-small btn-edit" onclick="exportReport()"><i class="fas fa-download"></i> Export PDF</button>
                     </div>
                     
                     <div class="report-content" style="background: var(--bg-light); padding: 1.5rem; border-radius: 10px;">
                         <div id="reportResults">
                             <p style="color: var(--text-light);">Select report parameters and click "Generate Report" to view results.</p>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- Maintenance Section -->
+                <div id="maintenance" class="admin-section">
+                    <h2 class="section-title"><i class="fas fa-tools"></i> Maintenance Management</h2>
+                    <p style="color: var(--text-light); margin-bottom: 1.5rem;">Manage maintenance and repair fees for resort facilities.</p>
+                    
+                    <div class="report-controls" style="margin-bottom: 1.5rem; display: flex; gap: 1rem; flex-wrap: wrap; align-items: center;">
+                        <input type="date" id="maintenanceStartDate" style="padding: 0.7rem; border: 1px solid var(--border-gray); border-radius: 6px; font-size: 0.95rem;">
+                        <input type="date" id="maintenanceEndDate" style="padding: 0.7rem; border: 1px solid var(--border-gray); border-radius: 6px; font-size: 0.95rem;">
+                        <button class="btn-primary" onclick="generateMaintenanceReportFromSection()"><i class="fas fa-sync-alt"></i> Generate Report</button>
+                        <button class="btn-primary" onclick="openAddFeeModal()"><i class="fas fa-plus"></i> Add Maintenance Fee</button>
+                    </div>
+                    
+                    <div class="report-content" style="background: var(--bg-light); padding: 1.5rem; border-radius: 10px;">
+                        <div id="maintenanceResults">
+                            <p style="color: var(--text-light);">Select date range and click "Generate Report" to view maintenance records.</p>
                         </div>
                     </div>
                 </div>
@@ -2410,6 +3031,9 @@ $reviews = $reviewsResult->fetch_all(MYSQLI_ASSOC);
 
     <script>
         function activateSection(section) {
+            const targetSection = document.getElementById(section);
+            const activeSection = targetSection ? section : 'dashboard';
+
             document.querySelectorAll('.admin-section').forEach(s => {
                 s.classList.remove('active');
             });
@@ -2418,85 +3042,467 @@ $reviews = $reviewsResult->fetch_all(MYSQLI_ASSOC);
                 l.classList.remove('active');
             });
 
-            const targetSection = document.getElementById(section);
-            if (targetSection) {
-                targetSection.classList.add('active');
-            }
+            document.getElementById(activeSection).classList.add('active');
 
             document.querySelectorAll('.menu-link').forEach(link => {
-                if (link.dataset.section === section) {
+                if (link.dataset.section === activeSection) {
                     link.classList.add('active');
                 }
             });
+
+            return activeSection;
         }
 
         const params = new URLSearchParams(window.location.search);
         const initialSection = params.get('section') || 'dashboard';
 
         // Admin navigation
-        document.querySelectorAll('.menu-link').forEach(link => {
-            link.addEventListener('click', (e) => {
-                e.preventDefault();
-                const section = link.dataset.section;
-                activateSection(section);
+        document.addEventListener('DOMContentLoaded', function() {
+            document.querySelectorAll('.menu-link').forEach(link => {
+                link.addEventListener('click', (e) => {
+                    e.preventDefault();
+                    const section = link.dataset.section;
+                    const activeSection = activateSection(section);
 
+                    const url = new URL(window.location.href);
+                    url.searchParams.set('section', activeSection);
+                    window.history.replaceState({}, '', url.toString());
+                });
+            });
+
+            activateSection(initialSection);
+        });
+
+        let pendingDeleteForm = null;
+
+        function openDeleteConfirmModal(form) {
+            pendingDeleteForm = form;
+            const modal = document.getElementById('deleteConfirmModal');
+            if (!modal) return;
+            modal.style.display = 'flex';
+        }
+
+        function closeDeleteConfirmModal() {
+            const modal = document.getElementById('deleteConfirmModal');
+            if (modal) modal.style.display = 'none';
+            pendingDeleteForm = null;
+        }
+
+        function confirmDeleteAction() {
+            if (pendingDeleteForm) {
+                pendingDeleteForm.submit();
+                return;
+            }
+            closeDeleteConfirmModal();
+        }
+
+        // Management notice popup (add=blue, edit=green, delete=red)
+        function showManagementNotice(type, item) {
+            const modal = document.getElementById('managementNoticeModal');
+            const card = document.getElementById('managementNoticeCard');
+            const iconEl = document.getElementById('managementNoticeIcon');
+            const titleEl = document.getElementById('managementNoticeTitle');
+            const messageEl = document.getElementById('managementNoticeMessage');
+            const okBtn = document.getElementById('managementNoticeOkBtn');
+            if (!modal || !card || !iconEl || !titleEl || !messageEl || !okBtn) return;
+
+            const itemLabels = {
+                room: 'Room',
+                cottage: 'Cottage',
+                pool: 'Pool',
+                food: 'Food item'
+            };
+            const label = itemLabels[item] || 'Item';
+
+            const configs = {
+                added: {
+                    color: '#2563eb',
+                    icon: 'fas fa-plus-circle',
+                    title: label + ' Added',
+                    message: 'The ' + label.toLowerCase() + ' was added successfully.'
+                },
+                updated: {
+                    color: '#16a34a',
+                    icon: 'fas fa-check-circle',
+                    title: label + ' Updated',
+                    message: 'The ' + label.toLowerCase() + ' was updated successfully.'
+                },
+                deleted: {
+                    color: '#dc2626',
+                    icon: 'fas fa-trash-alt',
+                    title: label + ' Deleted',
+                    message: 'The ' + label.toLowerCase() + ' was deleted successfully.'
+                }
+            };
+
+            const config = configs[type] || configs.updated;
+            card.style.borderTopColor = config.color;
+            iconEl.className = config.icon;
+            iconEl.style.color = config.color;
+            titleEl.textContent = config.title;
+            titleEl.style.color = config.color;
+            messageEl.textContent = config.message;
+            okBtn.style.background = config.color;
+            modal.style.display = 'flex';
+        }
+
+        function closeManagementNotice() {
+            const modal = document.getElementById('managementNoticeModal');
+            if (modal) modal.style.display = 'none';
+        }
+
+        function initManagementNoticeFromUrl() {
+            const url = new URL(window.location.href);
+            const notice = url.searchParams.get('notice');
+            const item = url.searchParams.get('item');
+            if (!notice || !['added', 'updated', 'deleted'].includes(notice)) return;
+            if (!item || !['room', 'cottage', 'pool', 'food'].includes(item)) return;
+
+            showManagementNotice(notice, item);
+            url.searchParams.delete('notice');
+            url.searchParams.delete('item');
+            window.history.replaceState({}, '', url.toString());
+        }
+
+        // Modal is rendered after this script — wait for full DOM before showing notices
+        document.addEventListener('DOMContentLoaded', function() {
+            const managementModal = document.getElementById('managementNoticeModal');
+            if (managementModal) {
+                managementModal.addEventListener('click', function(e) {
+                    if (e.target === managementModal) closeManagementNotice();
+                });
+            }
+            initManagementNoticeFromUrl();
+        });
+
+        // Notification bell (real-time pending count)
+        (function initNotificationBell() {
+            const bellBtn = document.getElementById('notifBellBtn');
+            const dropdown = document.getElementById('notifDropdown');
+            const listEl = document.getElementById('notifDropdownList');
+            const alertCountEl = document.getElementById('notifAlertCount');
+            if (!bellBtn || !dropdown || !listEl) return;
+
+            function escapeHtml(value) {
+                return String(value)
+                    .replace(/&/g, '&amp;')
+                    .replace(/</g, '&lt;')
+                    .replace(/>/g, '&gt;')
+                    .replace(/"/g, '&quot;')
+                    .replace(/'/g, '&#39;');
+            }
+
+            function closeNotifDropdown() {
+                dropdown.classList.remove('open');
+                bellBtn.setAttribute('aria-expanded', 'false');
+            }
+
+            function openSectionFromNotif(section) {
+                activateSection(section);
                 const url = new URL(window.location.href);
                 url.searchParams.set('section', section);
                 window.history.replaceState({}, '', url.toString());
-            });
-        });
+                closeNotifDropdown();
+            }
 
-        activateSection(initialSection);
+            function bindNotifItemClicks() {
+                listEl.querySelectorAll('.notif-item').forEach((item) => {
+                    item.addEventListener('click', () => {
+                        openSectionFromNotif(item.dataset.section || 'reservations');
+                    });
+                });
+            }
+
+            function updateNotifBadge(count) {
+                let badge = document.getElementById('notifBadge');
+                if (count <= 0) {
+                    if (badge) badge.remove();
+                    if (alertCountEl) alertCountEl.textContent = '0 alerts';
+                    return;
+                }
+
+                const label = count > 99 ? '99+' : String(count);
+                if (!badge) {
+                    badge = document.createElement('span');
+                    badge.className = 'notif-badge';
+                    badge.id = 'notifBadge';
+                    bellBtn.appendChild(badge);
+                }
+                badge.textContent = label;
+                if (alertCountEl) {
+                    alertCountEl.textContent = count + ' alert' + (count === 1 ? '' : 's');
+                }
+            }
+
+            function renderNotifList(items) {
+                if (!items || items.length === 0) {
+                    listEl.innerHTML = '<div class="notif-empty">No pending reservations</div>';
+                    return;
+                }
+
+                listEl.innerHTML = items.map((item) => {
+                    const name = escapeHtml(item.name || 'Guest');
+                    const itemsLabel = escapeHtml(item.items || 'Reservation');
+                    const checkIn = escapeHtml(item.check_in_label || item.check_in || '');
+                    const id = Number(item.id) || 0;
+                    return (
+                        '<button type="button" class="notif-item" data-section="reservations" role="menuitem">' +
+                            '<div class="notif-item-title">' +
+                                '<span>' + name + '</span>' +
+                                '<span class="notif-tag pending">Pending</span>' +
+                            '</div>' +
+                            '<div class="notif-item-meta">' +
+                                '#' + id + ' · ' + itemsLabel + '<br>' +
+                                'Check-in: ' + checkIn +
+                            '</div>' +
+                        '</button>'
+                    );
+                }).join('');
+                bindNotifItemClicks();
+            }
+
+            function refreshPendingNotifications() {
+                return fetch('../api/get_pending_notifications.php', {
+                    method: 'GET',
+                    credentials: 'same-origin',
+                    headers: { 'Accept': 'application/json' }
+                })
+                .then(async (response) => {
+                    const data = await response.json();
+                    if (!response.ok || !data?.success) {
+                        throw new Error(data?.message || 'Failed to load notifications');
+                    }
+                    return data;
+                })
+                .then((data) => {
+                    updateNotifBadge(Number(data.count) || 0);
+                    renderNotifList(Array.isArray(data.items) ? data.items : []);
+                    return data;
+                })
+                .catch(() => null);
+            }
+
+            window.refreshPendingNotifications = refreshPendingNotifications;
+
+            bellBtn.addEventListener('click', (e) => {
+                e.stopPropagation();
+                const isOpen = dropdown.classList.toggle('open');
+                bellBtn.setAttribute('aria-expanded', isOpen ? 'true' : 'false');
+                if (isOpen) refreshPendingNotifications();
+            });
+
+            dropdown.addEventListener('click', (e) => e.stopPropagation());
+            bindNotifItemClicks();
+
+            const viewAllBtn = document.getElementById('notifViewAllBtn');
+            if (viewAllBtn) {
+                viewAllBtn.addEventListener('click', () => openSectionFromNotif('reservations'));
+            }
+
+            document.addEventListener('click', closeNotifDropdown);
+            document.addEventListener('keydown', (e) => {
+                if (e.key === 'Escape') {
+                    closeNotifDropdown();
+                    closeManagementNotice();
+                }
+            });
+
+            // Keep pending count live while admin stays on the page
+            setInterval(refreshPendingNotifications, 8000);
+            document.addEventListener('visibilitychange', () => {
+                if (!document.hidden) refreshPendingNotifications();
+            });
+        })();
 
         // Reservation Management Functions
         function viewReservation(reservationId) {
-            // Implementation for viewing reservation details
             console.log('Viewing reservation:', reservationId);
             alert('View reservation details for ID: ' + reservationId);
         }
 
-        function updateReservationStatus(reservationId, status) {
-            if (confirm('Are you sure you want to ' + status + ' this reservation?')) {
-                fetch('../api/update_reservation_status.php', {
-                    method: 'POST',
-                    headers: {
-                        'Content-Type': 'application/json',
-                    },
-                    body: JSON.stringify({
-                        reservation_id: reservationId,
-                        status: status
-                    })
-                })
-                .then(async response => {
-                    const text = await response.text();
-                    let data = null;
+        let pendingReservationAction = { id: null, status: null };
 
-                    if (text) {
-                        try {
-                            data = JSON.parse(text);
-                        } catch (error) {
-                            throw new Error(text.slice(0, 200));
-                        }
-                    }
-
-                    if (!response.ok) {
-                        throw new Error(data?.message || 'Request failed');
-                    }
-
-                    if (!data?.success) {
-                        throw new Error(data?.message || 'Unknown error');
-                    }
-
-                    return data;
-                })
-                .then(() => {
-                    alert('Reservation status updated successfully!');
-                    location.reload();
-                })
-                .catch(error => {
-                    alert('Error updating reservation: ' + error.message);
-                });
+        function openApproveReservationModal(reservationId) {
+            pendingReservationAction = { id: reservationId, status: 'approved' };
+            const modal = document.getElementById('approveReservationModal');
+            const idLabel = document.getElementById('approveReservationIdLabel');
+            if (idLabel) idLabel.textContent = '#' + reservationId;
+            if (modal) {
+                modal.style.display = 'flex';
             }
+        }
+
+        function closeApproveReservationModal() {
+            const modal = document.getElementById('approveReservationModal');
+            if (modal) modal.style.display = 'none';
+            pendingReservationAction = { id: null, status: null };
+        }
+
+        function confirmApproveReservation() {
+            if (!pendingReservationAction.id) return;
+            updateReservationStatus(pendingReservationAction.id, 'approved');
+        }
+
+        function openCancelReservationModal(reservationId) {
+            pendingReservationAction = { id: reservationId, status: 'cancelled' };
+            const modal = document.getElementById('cancelReservationModal');
+            const idLabel = document.getElementById('cancelReservationIdLabel');
+            const reasonInput = document.getElementById('cancellationReasonInput');
+            const errorEl = document.getElementById('cancellationReasonError');
+            if (idLabel) idLabel.textContent = '#' + reservationId;
+            if (reasonInput) reasonInput.value = '';
+            if (errorEl) {
+                errorEl.style.display = 'none';
+                errorEl.textContent = '';
+            }
+            if (modal) {
+                modal.style.display = 'flex';
+                setTimeout(() => reasonInput && reasonInput.focus(), 50);
+            }
+        }
+
+        function closeCancelReservationModal() {
+            const modal = document.getElementById('cancelReservationModal');
+            if (modal) modal.style.display = 'none';
+            pendingReservationAction = { id: null, status: null };
+        }
+
+        function confirmCancelReservation() {
+            const reasonInput = document.getElementById('cancellationReasonInput');
+            const errorEl = document.getElementById('cancellationReasonError');
+            const reason = (reasonInput?.value || '').trim();
+
+            if (reason.length < 5) {
+                if (errorEl) {
+                    errorEl.textContent = 'Please enter a cancellation reason (at least 5 characters).';
+                    errorEl.style.display = 'block';
+                }
+                reasonInput?.focus();
+                return;
+            }
+
+            if (!pendingReservationAction.id) return;
+            updateReservationStatus(pendingReservationAction.id, 'cancelled', reason);
+        }
+
+        function setReservationActionLoading(isLoading, status = null) {
+            const approveBtn = document.getElementById('confirmApproveBtn');
+            const cancelBtn = document.getElementById('confirmCancelBtn');
+
+            if (approveBtn) {
+                if (!approveBtn.dataset.defaultText) {
+                    approveBtn.dataset.defaultText = approveBtn.textContent.trim();
+                }
+                if (isLoading && status === 'approved') {
+                    approveBtn.disabled = true;
+                    approveBtn.classList.add('reservation-action-btn');
+                    approveBtn.innerHTML = '<span class="btn-loading"></span>Approving...';
+                } else if (!isLoading) {
+                    approveBtn.disabled = false;
+                    approveBtn.classList.remove('reservation-action-btn');
+                    approveBtn.textContent = approveBtn.dataset.defaultText;
+                }
+            }
+
+            if (cancelBtn) {
+                if (!cancelBtn.dataset.defaultText) {
+                    cancelBtn.dataset.defaultText = cancelBtn.textContent.trim();
+                }
+                if (isLoading && status === 'cancelled') {
+                    cancelBtn.disabled = true;
+                    cancelBtn.classList.add('reservation-action-btn');
+                    cancelBtn.innerHTML = '<span class="btn-loading"></span>Cancelling...';
+                } else if (!isLoading) {
+                    cancelBtn.disabled = false;
+                    cancelBtn.classList.remove('reservation-action-btn');
+                    cancelBtn.textContent = cancelBtn.dataset.defaultText;
+                }
+            }
+        }
+
+        function updateReservationStatus(reservationId, status, cancellationReason = '') {
+            setReservationActionLoading(true, status);
+
+            fetch('../api/update_reservation_status.php', {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json',
+                },
+                body: JSON.stringify({
+                    reservation_id: reservationId,
+                    status: status,
+                    cancellation_reason: cancellationReason
+                })
+            })
+            .then(async response => {
+                const text = await response.text();
+                let data = null;
+
+                if (text) {
+                    try {
+                        data = JSON.parse(text);
+                    } catch (error) {
+                        throw new Error(text.slice(0, 200));
+                    }
+                }
+
+                if (!response.ok) {
+                    throw new Error(data?.message || 'Request failed');
+                }
+
+                if (!data?.success) {
+                    throw new Error(data?.message || 'Unknown error');
+                }
+
+                return data;
+            })
+            .then((data) => {
+                closeApproveReservationModal();
+                closeCancelReservationModal();
+                if (typeof window.refreshPendingNotifications === 'function') {
+                    window.refreshPendingNotifications();
+                }
+                showReservationNotice(
+                    status === 'approved' ? 'Reservation Approved' : 'Reservation Cancelled',
+                    data.message || (status === 'approved'
+                        ? 'The reservation has been approved successfully.'
+                        : 'The reservation has been cancelled successfully.'),
+                    status === 'approved' ? 'success' : 'danger'
+                );
+                const noticeModal = document.getElementById('reservationNoticeModal');
+                if (noticeModal) noticeModal.dataset.reloadOnClose = 'true';
+            })
+            .catch(error => {
+                setReservationActionLoading(false);
+                showReservationNotice('Update Failed', 'Error updating reservation: ' + error.message, 'danger');
+            });
+        }
+
+        function showReservationNotice(title, message, type = 'success') {
+            const modal = document.getElementById('reservationNoticeModal');
+            const titleEl = document.getElementById('reservationNoticeTitle');
+            const messageEl = document.getElementById('reservationNoticeMessage');
+            const iconEl = document.getElementById('reservationNoticeIcon');
+            if (!modal) {
+                alert(message);
+                return;
+            }
+            if (titleEl) titleEl.textContent = title;
+            if (messageEl) messageEl.textContent = message;
+            if (iconEl) {
+                iconEl.className = type === 'success' ? 'fas fa-check-circle' : 'fas fa-exclamation-circle';
+                iconEl.style.color = type === 'success' ? '#16a34a' : '#dc2626';
+            }
+            modal.style.display = 'flex';
+        }
+
+        function closeReservationNoticeModal() {
+            const modal = document.getElementById('reservationNoticeModal');
+            if (!modal) return;
+            const reloadOnClose = modal.dataset.reloadOnClose === 'true';
+            delete modal.dataset.reloadOnClose;
+            modal.style.display = 'none';
+            if (reloadOnClose) location.reload();
         }
 
         // Facility Management Functions
@@ -2610,6 +3616,8 @@ $reviews = $reviewsResult->fetch_all(MYSQLI_ASSOC);
                 generateRevenueReport(startDate, endDate);
             } else if (reportType === 'customer') {
                 generateCustomerReport(startDate, endDate);
+            } else if (reportType === 'maintenance') {
+                generateMaintenanceReport(startDate, endDate);
             }
         }
 
@@ -2635,10 +3643,9 @@ $reviews = $reviewsResult->fetch_all(MYSQLI_ASSOC);
                         <tr>
                             <td>${row.month_name}</td>
                             <td>${row.total_bookings}</td>
-                            <td>${row.approved_bookings}</td>
-                            <td>${row.completed_bookings}</td>
-                            <td>${row.cancelled_bookings}</td>
-                            <td>₱${row.total_revenue.toLocaleString('en-PH', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</td>
+                            <td>₱${row.gross_revenue.toLocaleString('en-PH', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</td>
+                            <td>₱${row.maintenance_fees.toLocaleString('en-PH', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</td>
+                            <td>₱${row.net_revenue.toLocaleString('en-PH', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</td>
                         </tr>
                     `;
                 });
@@ -2648,10 +3655,9 @@ $reviews = $reviewsResult->fetch_all(MYSQLI_ASSOC);
                     <tr style="background: var(--primary-blue); color: white; font-weight: bold;">
                         <td>TOTAL</td>
                         <td>${summary.total_bookings}</td>
-                        <td>${summary.approved_bookings}</td>
-                        <td>${summary.completed_bookings}</td>
-                        <td>${summary.cancelled_bookings}</td>
-                        <td>₱${summary.total_revenue.toLocaleString('en-PH', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</td>
+                        <td>₱${summary.gross_revenue.toLocaleString('en-PH', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</td>
+                        <td>₱${summary.maintenance_fees.toLocaleString('en-PH', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</td>
+                        <td>₱${summary.net_revenue.toLocaleString('en-PH', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</td>
                     </tr>
                 `;
 
@@ -2674,10 +3680,9 @@ $reviews = $reviewsResult->fetch_all(MYSQLI_ASSOC);
                                 '<tr>' +
                                     '<th>Month</th>' +
                                     '<th>Total Bookings</th>' +
-                                    '<th>Approved</th>' +
-                                    '<th>Completed</th>' +
-                                    '<th>Cancelled</th>' +
-                                    '<th>Total Revenue</th>' +
+                                    '<th>Gross Revenue</th>' +
+                                    '<th>Maintenance Fees</th>' +
+                                    '<th>Net Revenue</th>' +
                                 '</tr>' +
                             '</thead>' +
                             '<tbody>' +
@@ -2687,9 +3692,38 @@ $reviews = $reviewsResult->fetch_all(MYSQLI_ASSOC);
                     '</div>' +
                     '<div style="margin-top: 1.5rem; padding: 1rem; background: var(--bg-light); border-radius: 8px;">' +
                         '<h4 style="color: var(--primary-blue); margin: 0 0 0.5rem 0;">Summary</h4>' +
-                        '<p style="margin: 0.25rem 0;"><strong>Total Revenue:</strong> ₱' + summary.total_revenue.toLocaleString('en-PH', { minimumFractionDigits: 2, maximumFractionDigits: 2 }) + '</p>' +
+                        '<p style="margin: 0.25rem 0;"><strong>Gross Revenue:</strong> ₱' + summary.gross_revenue.toLocaleString('en-PH', { minimumFractionDigits: 2, maximumFractionDigits: 2 }) + '</p>' +
+                        '<p style="margin: 0.25rem 0;"><strong>Maintenance Fees:</strong> ₱' + summary.maintenance_fees.toLocaleString('en-PH', { minimumFractionDigits: 2, maximumFractionDigits: 2 }) + '</p>' +
+                        '<p style="margin: 0.25rem 0;"><strong>Net Revenue:</strong> ₱' + summary.net_revenue.toLocaleString('en-PH', { minimumFractionDigits: 2, maximumFractionDigits: 2 }) + '</p>' +
                         '<p style="margin: 0.25rem 0;"><strong>Total Bookings:</strong> ' + summary.total_bookings + '</p>' +
-                        '<p style="margin: 0.25rem 0;"><strong>Success Rate:</strong> ' + (summary.total_bookings > 0 ? ((summary.approved_bookings + summary.completed_bookings) / summary.total_bookings * 100).toFixed(1) : 0) + '%</p>' +
+                    '</div>' +
+                    '<div style="margin-top: 1.5rem; padding: 1rem; background: #fff5f5; border-left: 4px solid #ef4444; border-radius: 8px;">' +
+                        '<h4 style="color: #dc2626; margin: 0 0 0.5rem 0;">Maintenance/Repair Fee Details</h4>' +
+                        (summary.fee_details && summary.fee_details.length > 0 ?
+                            '<table style="width: 100%; border-collapse: collapse; font-size: 0.95rem; color: #1f2937;">' +
+                                '<thead>' +
+                                    '<tr style="background: #fee2e2;">' +
+                                        '<th style="padding: 0.7rem; text-align: left; color: #7f1d1d; font-weight: 800;">Date</th>' +
+                                        '<th style="padding: 0.7rem; text-align: left; color: #7f1d1d; font-weight: 800;">Type</th>' +
+                                        '<th style="padding: 0.7rem; text-align: left; color: #7f1d1d; font-weight: 800;">Facility</th>' +
+                                        '<th style="padding: 0.7rem; text-align: left; color: #7f1d1d; font-weight: 800;">Name</th>' +
+                                        '<th style="padding: 0.7rem; text-align: right; color: #7f1d1d; font-weight: 800;">Amount</th>' +
+                                    '</tr>' +
+                                '</thead>' +
+                                '<tbody>' +
+                                    summary.fee_details.map(fee =>
+                                        '<tr>' +
+                                            '<td style="padding: 0.7rem; border-bottom: 1px solid #fecaca; color: #111827; font-weight: 600;">' + fee.date_incurred + '</td>' +
+                                            '<td style="padding: 0.7rem; border-bottom: 1px solid #fecaca; color: #111827; font-weight: 600; text-transform: capitalize;">' + fee.fee_type + '</td>' +
+                                            '<td style="padding: 0.7rem; border-bottom: 1px solid #fecaca; color: #111827; font-weight: 600; text-transform: capitalize;">' + fee.facility_type + '</td>' +
+                                            '<td style="padding: 0.7rem; border-bottom: 1px solid #fecaca; color: #111827; font-weight: 600;">' + fee.facility_name + '</td>' +
+                                            '<td style="padding: 0.7rem; border-bottom: 1px solid #fecaca; color: #111827; text-align: right; font-weight: 800;">₱' + fee.amount.toLocaleString('en-PH', { minimumFractionDigits: 2, maximumFractionDigits: 2 }) + '</td>' +
+                                        '</tr>'
+                                    ).join('') +
+                                '</tbody>' +
+                            '</table>' :
+                            '<p style="margin: 0; color: #6b7280;">No maintenance/repair fees recorded for this period.</p>'
+                        ) +
                     '</div>' +
                 '</div>';
 
@@ -2703,11 +3737,634 @@ $reviews = $reviewsResult->fetch_all(MYSQLI_ASSOC);
             }
         }
 
-        function generateCustomerReport(startDate, endDate) {
+        const customerAnalyticsCharts = {};
+
+        function generateMaintenanceReportFromSection() {
+            const startDate = document.getElementById('maintenanceStartDate').value;
+            const endDate = document.getElementById('maintenanceEndDate').value;
+            
+            if (!startDate || !endDate) {
+                alert('Please select date range');
+                return;
+            }
+            
+            generateMaintenanceReport(startDate, endDate, 'maintenanceResults');
+        }
+
+        async function generateMaintenanceReport(startDate, endDate, targetElementId = 'reportResults') {
+            const reportResults = document.getElementById(targetElementId);
+            reportResults.innerHTML = '<p style="color: var(--text-light);"><i class="fas fa-spinner fa-spin"></i> Generating maintenance report...</p>';
+
+            try {
+                const response = await fetch(`../api/get_maintenance_report.php?start_date=${startDate}&end_date=${endDate}`);
+                const data = await response.json();
+
+                if (!data.success) {
+                    reportResults.innerHTML = `<p style="color: #ef4444;">Error: ${data.message}</p>`;
+                    return;
+                }
+
+                const maintenanceData = data.data || [];
+                const summary = data.summary || { total_fees: 0, total_count: 0 };
+
+                let tableRows = '';
+                maintenanceData.forEach(fee => {
+                    tableRows += `
+                        <tr>
+                            <td>${fee.date_incurred}</td>
+                            <td style="text-transform: capitalize;">${fee.fee_type}</td>
+                            <td style="text-transform: capitalize;">${fee.facility_type}</td>
+                            <td>${fee.facility_name}</td>
+                            <td>₱${parseFloat(fee.amount).toLocaleString('en-PH', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</td>
+                            <td>${fee.description || '-'}</td>
+                        </tr>
+                    `;
+                });
+
+                const reportContent = `
+                    <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 1.5rem;">
+                        <div>
+                            <h3 style="color: var(--primary-blue); margin: 0;">Maintenance Report</h3>
+                            <p style="color: var(--text-light); margin: 0.5rem 0 0 0;">
+                                Period: ${new Date(startDate + 'T00:00:00').toLocaleDateString('en-US', { year: 'numeric', month: 'long', day: 'numeric' })} - 
+                                ${new Date(endDate + 'T00:00:00').toLocaleDateString('en-US', { year: 'numeric', month: 'long', day: 'numeric' })}
+                            </p>
+                        </div>
+                        <div style="display: flex; gap: 0.5rem;">
+                            <button class="btn-small btn-edit" onclick="openAddFeeModal()">
+                                <i class="fas fa-plus"></i> Add Maintenance Fee
+                            </button>
+                            <button class="btn-small btn-edit" id="printMaintenanceReportBtn">
+                                <i class="fas fa-print"></i> Print Report
+                            </button>
+                        </div>
+                    </div>
+
+                    <div style="margin-bottom: 1.5rem; padding: 1rem; background: var(--bg-light); border-radius: 8px;">
+                        <h4 style="color: var(--primary-blue); margin: 0 0 0.5rem 0;">Summary</h4>
+                        <p style="margin: 0.25rem 0;"><strong>Total Maintenance Fees:</strong> ₱${summary.total_fees.toLocaleString('en-PH', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</p>
+                        <p style="margin: 0.25rem 0;"><strong>Total Transactions:</strong> ${summary.total_count}</p>
+                    </div>
+
+                    <div class="table-container">
+                        <table>
+                            <thead>
+                                <tr>
+                                    <th>Date</th>
+                                    <th>Type</th>
+                                    <th>Facility Type</th>
+                                    <th>Facility Name</th>
+                                    <th>Amount</th>
+                                    <th>Description</th>
+                                </tr>
+                            </thead>
+                            <tbody>
+                                ${tableRows || '<tr><td colspan="6" style="text-align: center; color: var(--text-light);">No maintenance records found for this period.</td></tr>'}
+                            </tbody>
+                        </table>
+                    </div>
+                `;
+
+                reportResults.innerHTML = reportContent;
+
+                // Add event listener to print button
+                document.getElementById('printMaintenanceReportBtn').addEventListener('click', printMaintenanceReport);
+
+            } catch (error) {
+                reportResults.innerHTML = '<p style="color: #ef4444;">Error generating maintenance report: ' + error.message + '</p>';
+            }
+        }
+
+        function printMaintenanceReport() {
+            const reportContent = document.getElementById('reportResults').innerHTML;
+            const printWindow = window.open('', '_blank');
+            printWindow.document.write(`
+                <!DOCTYPE html>
+                <html>
+                <head>
+                    <title>Maintenance Report - Villa Soledad Garden Resort</title>
+                    <style>
+                        body { font-family: Arial, sans-serif; padding: 20px; }
+                        table { width: 100%; border-collapse: collapse; margin-top: 20px; }
+                        th, td { border: 1px solid #ddd; padding: 8px; text-align: left; }
+                        th { background-color: #4169E1; color: white; }
+                        .summary { background-color: #f9fafb; padding: 15px; margin: 20px 0; border-radius: 5px; }
+                        h3 { color: #4169E1; }
+                    </style>
+                </head>
+                <body>
+                    ${reportContent}
+                </body>
+                </html>
+            `);
+            printWindow.document.close();
+            printWindow.print();
+        }
+
+        function destroyCustomerAnalyticsCharts() {
+            Object.keys(customerAnalyticsCharts).forEach(key => {
+                try {
+                    customerAnalyticsCharts[key].destroy();
+                } catch (e) { /* ignore */ }
+                delete customerAnalyticsCharts[key];
+            });
+        }
+
+        function ensureChartJsLoaded() {
+            return new Promise((resolve, reject) => {
+                if (typeof Chart !== 'undefined') {
+                    resolve();
+                    return;
+                }
+                const script = document.createElement('script');
+                script.src = 'https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.0/chart.umd.min.js';
+                script.onload = () => (typeof Chart !== 'undefined' ? resolve() : reject(new Error('Chart.js failed to load')));
+                script.onerror = () => reject(new Error('Chart.js CDN could not be loaded. Check your internet connection.'));
+                document.head.appendChild(script);
+            });
+        }
+
+        function createAnalyticsChart(canvasId, config) {
+            const canvas = document.getElementById(canvasId);
+            if (!canvas) {
+                console.error('Canvas not found:', canvasId);
+                return null;
+            }
+            const wrapper = canvas.parentElement;
+            if (wrapper) {
+                wrapper.style.position = 'relative';
+                if (!wrapper.style.minHeight) {
+                    wrapper.style.minHeight = '220px';
+                }
+            }
+            canvas.style.width = '100%';
+            canvas.style.height = '100%';
+            canvas.style.display = 'block';
+
+            if (customerAnalyticsCharts[canvasId]) {
+                try { customerAnalyticsCharts[canvasId].destroy(); } catch (e) { /* ignore */ }
+            }
+
+            const chart = new Chart(canvas, config);
+            customerAnalyticsCharts[canvasId] = chart;
+            return chart;
+        }
+
+        function normalizeWeekendWeekday(rows) {
+            const map = { Weekday: 0, Weekend: 0 };
+            (rows || []).forEach(row => {
+                if (row.day_type === 'Weekend') map.Weekend = Number(row.bookings) || 0;
+                else map.Weekday = Number(row.bookings) || 0;
+            });
+            return {
+                labels: ['Weekday', 'Weekend'],
+                data: [map.Weekday, map.Weekend]
+            };
+        }
+
+        function normalizeDayNight(rows) {
+            const map = { Day: 0, Night: 0 };
+            (rows || []).forEach(row => {
+                const key = String(row.tour_type || '').toLowerCase();
+                if (key === 'night') map.Night = Number(row.bookings) || 0;
+                else if (key === 'day') map.Day = Number(row.bookings) || 0;
+                else {
+                    // Keep unknown types as Day bucket label override later if needed
+                    map.Day += Number(row.bookings) || 0;
+                }
+            });
+            return {
+                labels: ['Day Tours', 'Night Tours'],
+                data: [map.Day, map.Night]
+            };
+        }
+
+        function buildTrendSeries(analytics, startDate, endDate) {
+            const monthly = analytics.monthly_bookings || [];
+            const byMonth = {};
+            monthly.forEach(m => {
+                byMonth[m.month] = Number(m.bookings) || 0;
+            });
+
+            const monthsShort = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
+            const start = new Date(startDate + 'T00:00:00');
+            const end = new Date(endDate + 'T00:00:00');
+            const labels = [];
+            const data = [];
+
+            // Same calendar year: show full Jan–Dec (matches Statistics chart)
+            if (!isNaN(start) && !isNaN(end) && start.getFullYear() === end.getFullYear()) {
+                const year = start.getFullYear();
+                for (let month = 1; month <= 12; month++) {
+                    const key = year + '-' + String(month).padStart(2, '0');
+                    labels.push(monthsShort[month - 1]);
+                    data.push(byMonth[key] || 0);
+                }
+            } else if (!isNaN(start) && !isNaN(end) && start <= end) {
+                const cursor = new Date(start.getFullYear(), start.getMonth(), 1);
+                const last = new Date(end.getFullYear(), end.getMonth(), 1);
+                while (cursor <= last) {
+                    const key = cursor.getFullYear() + '-' + String(cursor.getMonth() + 1).padStart(2, '0');
+                    labels.push(monthsShort[cursor.getMonth()]);
+                    data.push(byMonth[key] || 0);
+                    cursor.setMonth(cursor.getMonth() + 1);
+                }
+            } else {
+                monthly.forEach(m => {
+                    labels.push(m.month_name);
+                    data.push(Number(m.bookings) || 0);
+                });
+            }
+
+            return {
+                title: 'Monthly Booking Trend',
+                labels,
+                data
+            };
+        }
+
+        function renderMonthlyBookingTrend(containerId, labels, values) {
+            const container = document.getElementById(containerId);
+            if (!container) return;
+
+            const lineColor = '#1E88E5';
+            const markerColor = '#1565C0';
+            const gridColor = '#E0E0E0';
+            const labelColor = '#424242';
+
+            const w = Math.max(container.clientWidth || 700, 560);
+            const h = 320;
+            const padLeft = 52;
+            const padRight = 24;
+            const padTop = 28;
+            const padBottom = 56; // month + booking count
+            const dataMax = Math.max(...values, 1);
+            // Nice Y-axis max (steps of 10 like the mockup)
+            const yMax = Math.max(10, Math.ceil(dataMax / 10) * 10);
+            const ySteps = Math.min(8, Math.max(4, Math.round(yMax / 10)));
+            const usableW = w - padLeft - padRight;
+            const usableH = h - padTop - padBottom;
+            const stepX = values.length > 1 ? usableW / (values.length - 1) : usableW / 2;
+
+            const valueToY = (v) => padTop + usableH - (v / yMax) * usableH;
+
+            let path = '';
+            values.forEach((v, i) => {
+                const x = padLeft + i * stepX;
+                const y = valueToY(v);
+                path += (i === 0 ? 'M ' : ' L ') + x + ' ' + y;
+            });
+
+            let svg = '<svg viewBox="0 0 ' + w + ' ' + h + '" preserveAspectRatio="xMidYMid meet" style="width:100%; height:100%; display:block; background:#ffffff;">';
+
+            // Y-axis title
+            svg += '<text x="14" y="' + (padTop + usableH / 2) + '" font-size="12" font-weight="600" fill="' + labelColor + '" text-anchor="middle" transform="rotate(-90 14 ' + (padTop + usableH / 2) + ')">Bookings</text>';
+
+            // Horizontal gridlines + Y labels
+            for (let g = 0; g <= ySteps; g++) {
+                const value = Math.round((yMax / ySteps) * (ySteps - g));
+                const gy = padTop + (usableH * g / ySteps);
+                svg += '<line x1="' + padLeft + '" y1="' + gy + '" x2="' + (w - padRight) + '" y2="' + gy + '" stroke="' + gridColor + '" stroke-width="1"/>';
+                svg += '<text x="' + (padLeft - 8) + '" y="' + (gy + 4) + '" font-size="11" text-anchor="end" fill="' + labelColor + '">' + value + '</text>';
+            }
+
+            // Axes
+            svg += '<line x1="' + padLeft + '" y1="' + padTop + '" x2="' + padLeft + '" y2="' + (padTop + usableH) + '" stroke="' + labelColor + '" stroke-width="1.25"/>';
+            svg += '<line x1="' + padLeft + '" y1="' + (padTop + usableH) + '" x2="' + (w - padRight) + '" y2="' + (padTop + usableH) + '" stroke="' + labelColor + '" stroke-width="1.25"/>';
+
+            // Trend line
+            svg += '<path d="' + path + '" fill="none" stroke="' + lineColor + '" stroke-width="2.75" stroke-linecap="round" stroke-linejoin="round"/>';
+
+            // Markers + month labels + booking counts under months
+            values.forEach((v, i) => {
+                const x = padLeft + i * stepX;
+                const y = valueToY(v);
+                svg += '<circle cx="' + x + '" cy="' + y + '" r="5" fill="' + markerColor + '" stroke="#ffffff" stroke-width="1.5"/>';
+                svg += '<text x="' + x + '" y="' + (h - padBottom + 18) + '" font-size="11" font-weight="600" text-anchor="middle" fill="' + labelColor + '">' + labels[i] + '</text>';
+                svg += '<text x="' + x + '" y="' + (h - padBottom + 34) + '" font-size="11" font-weight="700" text-anchor="middle" fill="' + labelColor + '">' + v + '</text>';
+            });
+
+            svg += '</svg>';
+            container.innerHTML = svg;
+        }
+
+        async function generateCustomerReport(startDate, endDate) {
             const reportResults = document.getElementById('reportResults');
-            reportResults.innerHTML = '<h4>Customer Analytics Report</h4>' +
-                '<p><strong>Period:</strong> ' + startDate + ' to ' + endDate + '</p>' +
-                '<p style="color: var(--text-light);">Customer analytics report will be implemented here.</p>';
+            destroyCustomerAnalyticsCharts();
+            reportResults.innerHTML = '<p style="color: var(--text-light);"><i class="fas fa-spinner fa-spin"></i> Generating customer analytics...</p>';
+
+            try {
+                await ensureChartJsLoaded();
+
+                const response = await fetch(`../api/get_customer_analytics.php?start_date=${encodeURIComponent(startDate)}&end_date=${encodeURIComponent(endDate)}`);
+                const data = await response.json();
+
+                if (!data.success) {
+                    reportResults.innerHTML = `<p style="color: #ef4444;">Error: ${data.message}</p>`;
+                    return;
+                }
+
+                const analytics = data.data || {};
+                const loyalty = analytics.guest_loyalty || {
+                    new_guests: 0,
+                    returning_guests: 0,
+                    new_guests_percentage: 0,
+                    returning_guests_percentage: 0,
+                    total_guests: 0
+                };
+                const trend = buildTrendSeries(analytics, startDate, endDate);
+                const chartBox = 'margin-bottom: 2rem; padding: 1.5rem; background: #ffffff; border: 1px solid #e5e7eb; border-radius: 8px;';
+                const chartBoxHalf = 'padding: 1.5rem; background: #ffffff; border: 1px solid #e5e7eb; border-radius: 8px;';
+
+                const reportContent = '<div id="customerAnalyticsContent">' +
+                    '<div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 1.5rem;">' +
+                        '<div>' +
+                            '<h3 style="color: var(--primary-blue); margin: 0;">Customer Analytics Report</h3>' +
+                            '<p style="color: var(--text-light); margin: 0.5rem 0 0 0;">' +
+                                'Period: ' + new Date(startDate + 'T00:00:00').toLocaleDateString('en-US', { year: 'numeric', month: 'long', day: 'numeric' }) + ' - ' +
+                                new Date(endDate + 'T00:00:00').toLocaleDateString('en-US', { year: 'numeric', month: 'long', day: 'numeric' }) +
+                            '</p>' +
+                        '</div>' +
+                        '<button class="btn-small btn-edit" id="printCustomerReportBtn">' +
+                            '<i class="fas fa-print"></i> Print Report' +
+                        '</button>' +
+                    '</div>' +
+
+                    '<div style="' + chartBox + '">' +
+                        '<h4 id="bookingTrendTitle" style="color: #424242; margin: 0 0 1rem 0;">Monthly Booking Trend</h4>' +
+                        '<div id="customerMonthlyBookingsChart" style="width:100%; height:320px; background:#ffffff;"></div>' +
+                        '<p id="monthlyBookingsEmpty" style="display:none; text-align:center; color:#6b7280; margin:0.5rem 0 0 0;">No booking data for this period.</p>' +
+                    '</div>' +
+
+                    '<div style="display: grid; grid-template-columns: 1fr 1fr; gap: 1.5rem; margin-bottom: 2rem;">' +
+                        '<div style="' + chartBoxHalf + '">' +
+                            '<h4 style="color: #111827; margin: 0 0 1rem 0;">Weekend vs Weekday</h4>' +
+                            '<div style="position: relative; height: 250px; width: 100%;"><canvas id="weekendWeekdayChart"></canvas></div>' +
+                        '</div>' +
+                        '<div style="' + chartBoxHalf + '">' +
+                            '<h4 style="color: #111827; margin: 0 0 1rem 0;">Day vs Night Tours</h4>' +
+                            '<div style="position: relative; height: 250px; width: 100%;"><canvas id="dayNightChart"></canvas></div>' +
+                        '</div>' +
+                    '</div>' +
+
+                    '<div style="' + chartBox + '">' +
+                        '<h4 style="color: #111827; margin: 0 0 1rem 0;">Repeat vs New Guests</h4>' +
+                        '<div style="display: grid; grid-template-columns: 1fr 1fr; gap: 2rem; align-items: center;">' +
+                            '<div style="position: relative; height: 250px; width: 100%;"><canvas id="guestLoyaltyChart"></canvas></div>' +
+                            '<div>' +
+                                '<div style="padding: 1rem; background: #f9fafb; border: 1px solid #e5e7eb; border-radius: 6px; margin-bottom: 1rem;">' +
+                                    '<div style="font-size: 1.5rem; font-weight: bold; color: #111827;">' + loyalty.new_guests_percentage + '%</div>' +
+                                    '<div style="color: #6b7280; font-size: 0.9rem;">New Guests (' + loyalty.new_guests + ')</div>' +
+                                '</div>' +
+                                '<div style="padding: 1rem; background: #f9fafb; border: 1px solid #e5e7eb; border-radius: 6px;">' +
+                                    '<div style="font-size: 1.5rem; font-weight: bold; color: #111827;">' + loyalty.returning_guests_percentage + '%</div>' +
+                                    '<div style="color: #6b7280; font-size: 0.9rem;">Returning Guests (' + loyalty.returning_guests + ')</div>' +
+                                '</div>' +
+                                '<p style="margin-top: 1rem; margin-bottom: 0; color: #6b7280; font-size: 0.9rem;">' +
+                                    '<strong>Total Guests:</strong> ' + loyalty.total_guests +
+                                '</p>' +
+                            '</div>' +
+                        '</div>' +
+                    '</div>' +
+
+                    '<div style="padding: 1.5rem; background: #ffffff; border: 1px solid #e5e7eb; border-radius: 8px;">' +
+                        '<h4 style="color: var(--primary-blue); margin: 0 0 1rem 0;">Peak Booking Months</h4>' +
+                        (analytics.peak_months && analytics.peak_months.length > 0 ?
+                            '<ul style="margin: 0; padding-left: 1.5rem;">' +
+                                analytics.peak_months.map((pm, i) =>
+                                    '<li style="margin-bottom: 0.25rem;"><strong>' + (i + 1) + '. ' + pm.month_name + ':</strong> ' + pm.bookings + ' bookings</li>'
+                                ).join('') +
+                            '</ul>' :
+                            '<p style="margin: 0; color: #6b7280;">No booking data available for this period.</p>'
+                        ) +
+                    '</div>' +
+
+                    '<div style="padding: 1.5rem; background: #ffffff; border: 1px solid #e5e7eb; border-radius: 8px; margin-top: 1.5rem;">' +
+                        '<h4 style="color: var(--primary-blue); margin: 0 0 1rem 0;">Occupancy Rates & Guest Count</h4>' +
+                        (analytics.occupancy_rates && analytics.occupancy_rates.length > 0 ?
+                            '<div style="overflow-x: auto;">' +
+                                '<table style="width: 100%; border-collapse: collapse; font-size: 0.9rem;">' +
+                                    '<thead>' +
+                                        '<tr style="background: #f9fafb;">' +
+                                            '<th style="padding: 0.75rem; text-align: left; border-bottom: 2px solid #e5e7eb;">Date</th>' +
+                                            '<th style="padding: 0.75rem; text-align: right; border-bottom: 2px solid #e5e7eb;">Bookings</th>' +
+                                            '<th style="padding: 0.75rem; text-align: right; border-bottom: 2px solid #e5e7eb;">Total Guests</th>' +
+                                        '</tr>' +
+                                    '</thead>' +
+                                    '<tbody>' +
+                                        analytics.occupancy_rates.map(or =>
+                                            '<tr>' +
+                                                '<td style="padding: 0.75rem; border-bottom: 1px solid #e5e7eb;">' + or.date + '</td>' +
+                                                '<td style="padding: 0.75rem; text-align: right; border-bottom: 1px solid #e5e7eb;">' + or.bookings + '</td>' +
+                                                '<td style="padding: 0.75rem; text-align: right; border-bottom: 1px solid #e5e7eb;">' + or.total_guests + '</td>' +
+                                            '</tr>'
+                                        ).join('') +
+                                    '</tbody>' +
+                                '</table>' +
+                            '</div>' :
+                            '<p style="margin: 0; color: #6b7280;">No occupancy data available for this period.</p>'
+                        ) +
+                    '</div>' +
+
+                    '<div style="padding: 1.5rem; background: #ffffff; border: 1px solid #e5e7eb; border-radius: 8px; margin-top: 1.5rem;">' +
+                        '<h4 style="color: var(--primary-blue); margin: 0 0 1rem 0;">Facility Usage Statistics</h4>' +
+                        (analytics.facility_usage && analytics.facility_usage.length > 0 ?
+                            '<div style="overflow-x: auto;">' +
+                                '<table style="width: 100%; border-collapse: collapse; font-size: 0.9rem;">' +
+                                    '<thead>' +
+                                        '<tr style="background: #f9fafb;">' +
+                                            '<th style="padding: 0.75rem; text-align: left; border-bottom: 2px solid #e5e7eb;">Facility</th>' +
+                                            '<th style="padding: 0.75rem; text-align: left; border-bottom: 2px solid #e5e7eb;">Type</th>' +
+                                            '<th style="padding: 0.75rem; text-align: right; border-bottom: 2px solid #e5e7eb;">Usage Count</th>' +
+                                            '<th style="padding: 0.75rem; text-align: right; border-bottom: 2px solid #e5e7eb;">Total Users</th>' +
+                                        '</tr>' +
+                                    '</thead>' +
+                                    '<tbody>' +
+                                        analytics.facility_usage.map(fu =>
+                                            '<tr>' +
+                                                '<td style="padding: 0.75rem; border-bottom: 1px solid #e5e7eb; font-weight: 600;">' + fu.item_name + '</td>' +
+                                                '<td style="padding: 0.75rem; border-bottom: 1px solid #e5e7eb; text-transform: capitalize;">' + fu.item_type + '</td>' +
+                                                '<td style="padding: 0.75rem; text-align: right; border-bottom: 1px solid #e5e7eb;">' + fu.usage_count + '</td>' +
+                                                '<td style="padding: 0.75rem; text-align: right; border-bottom: 1px solid #e5e7eb;">' + fu.total_users + '</td>' +
+                                            '</tr>'
+                                        ).join('') +
+                                    '</tbody>' +
+                                '</table>' +
+                            '</div>' :
+                            '<p style="margin: 0; color: #6b7280;">No facility usage data available for this period.</p>'
+                        ) +
+                    '</div>' +
+                '</div>';
+
+                reportResults.innerHTML = reportContent;
+
+                // Wait for layout so Chart.js gets non-zero canvas size
+                await new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)));
+
+                const commonOptions = {
+                    responsive: true,
+                    maintainAspectRatio: false,
+                    animation: { duration: 400 }
+                };
+
+                try {
+                    const hasBookings = trend.data.some(v => Number(v) > 0);
+                    if (!trend.labels.length || !hasBookings) {
+                        const emptyEl = document.getElementById('monthlyBookingsEmpty');
+                        if (emptyEl) emptyEl.style.display = 'block';
+                    }
+                    // Same style as Statistics > Monthly Bookings, with count under each month
+                    renderMonthlyBookingTrend('customerMonthlyBookingsChart', trend.labels, trend.data);
+                } catch (err) {
+                    console.error('Trend chart error:', err);
+                }
+
+                try {
+                    const ww = normalizeWeekendWeekday(analytics.weekend_weekday);
+                    createAnalyticsChart('weekendWeekdayChart', {
+                        type: 'doughnut',
+                        data: {
+                            labels: ww.labels,
+                            datasets: [{
+                                data: ww.data,
+                                backgroundColor: ['#3b82f6', '#f59e0b'],
+                                borderWidth: 1,
+                                borderColor: '#ffffff'
+                            }]
+                        },
+                        options: {
+                            ...commonOptions,
+                            plugins: {
+                                legend: { position: 'bottom' },
+                                tooltip: {
+                                    callbacks: {
+                                        label: (ctx) => {
+                                            const total = ww.data.reduce((a, b) => a + b, 0) || 1;
+                                            const value = ctx.raw || 0;
+                                            return `${ctx.label}: ${value} (${Math.round(value / total * 100)}%)`;
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    });
+                } catch (err) {
+                    console.error('Weekend/weekday chart error:', err);
+                }
+
+                try {
+                    const dn = normalizeDayNight(analytics.day_night_tours);
+                    createAnalyticsChart('dayNightChart', {
+                        type: 'pie',
+                        data: {
+                            labels: dn.labels,
+                            datasets: [{
+                                data: dn.data,
+                                backgroundColor: ['#ec4899', '#8b5cf6'],
+                                borderWidth: 1,
+                                borderColor: '#ffffff'
+                            }]
+                        },
+                        options: {
+                            ...commonOptions,
+                            plugins: { legend: { position: 'bottom' } }
+                        }
+                    });
+                } catch (err) {
+                    console.error('Day/night chart error:', err);
+                }
+
+                try {
+                    createAnalyticsChart('guestLoyaltyChart', {
+                        type: 'doughnut',
+                        data: {
+                            labels: ['New Guests', 'Returning Guests'],
+                            datasets: [{
+                                data: [Number(loyalty.new_guests) || 0, Number(loyalty.returning_guests) || 0],
+                                backgroundColor: ['#22c55e', '#16a34a'],
+                                borderWidth: 1,
+                                borderColor: '#ffffff'
+                            }]
+                        },
+                        options: {
+                            ...commonOptions,
+                            plugins: { legend: { position: 'bottom' } }
+                        }
+                    });
+                } catch (err) {
+                    console.error('Guest loyalty chart error:', err);
+                }
+
+                const printCustomerBtn = document.getElementById('printCustomerReportBtn');
+                if (printCustomerBtn) {
+                    printCustomerBtn.addEventListener('click', printCustomerAnalyticsReport);
+                }
+
+            } catch (error) {
+                reportResults.innerHTML = '<p style="color: #ef4444;">Error generating customer analytics: ' + error.message + '</p>';
+            }
+        }
+
+        function printCustomerAnalyticsReport() {
+            const source = document.getElementById('customerAnalyticsContent');
+            if (!source) {
+                alert('Generate the customer analytics report first.');
+                return;
+            }
+
+            const clone = source.cloneNode(true);
+
+            // Hide print button in printed copy
+            const printBtn = clone.querySelector('#printCustomerReportBtn');
+            if (printBtn) {
+                printBtn.remove();
+            }
+
+            // Convert Chart.js canvases to images so they appear in print
+            const originalCanvases = source.querySelectorAll('canvas');
+            const cloneCanvases = clone.querySelectorAll('canvas');
+            originalCanvases.forEach((canvas, index) => {
+                if (!cloneCanvases[index]) return;
+                try {
+                    const img = document.createElement('img');
+                    img.src = canvas.toDataURL('image/png');
+                    img.alt = 'Chart';
+                    img.style.maxWidth = '100%';
+                    img.style.height = 'auto';
+                    img.style.display = 'block';
+                    cloneCanvases[index].parentNode.replaceChild(img, cloneCanvases[index]);
+                } catch (e) {
+                    console.error('Could not export chart for print:', e);
+                }
+            });
+
+            const printWindow = window.open('', '_blank');
+            if (!printWindow) {
+                alert('Please allow pop-ups to print this report.');
+                return;
+            }
+
+            printWindow.document.write('<!DOCTYPE html><html><head>' +
+                '<title>Customer Analytics Report - Villa Soledad Garden Resort</title>' +
+                '<style>' +
+                    'body { font-family: Arial, sans-serif; padding: 20px; color: #111827; background: #ffffff; }' +
+                    'h3, h4 { color: #1e3a8a; }' +
+                    'img { max-width: 100%; height: auto; }' +
+                    'svg { max-width: 100%; height: auto; }' +
+                    '#printCustomerReportBtn { display: none !important; }' +
+                    '@media print { body { print-color-adjust: exact; -webkit-print-color-adjust: exact; } }' +
+                '</style>' +
+                '</head><body>' +
+                    clone.innerHTML +
+                    '<script>' +
+                        'window.onload = function() {' +
+                            'window.print();' +
+                            'window.close();' +
+                        '};' +
+                    '<\/script>' +
+                '</body></html>'
+            );
+            printWindow.document.close();
         }
 
         function printRevenueReport() {
@@ -2736,10 +4393,6 @@ $reviews = $reviewsResult->fetch_all(MYSQLI_ASSOC);
                 '</body></html>'
             );
             printWindow.document.close();
-        }
-
-        function exportReport() {
-            alert('PDF export functionality will be implemented. Use Print Report for now.');
         }
 
         // Customer Management Functions
@@ -2888,6 +4541,22 @@ $reviews = $reviewsResult->fetch_all(MYSQLI_ASSOC);
             document.body.style.overflow = 'auto';
         }
 
+        function openArchiveModal(type) {
+            const modal = document.getElementById('archiveModal');
+            if (!modal) return;
+            document.querySelectorAll('[id^="archive-"]').forEach(panel => panel.style.display = 'none');
+            const panel = document.getElementById('archive-' + type);
+            if (panel) panel.style.display = 'block';
+            modal.style.display = 'flex';
+            document.body.style.overflow = 'hidden';
+        }
+
+        function closeArchiveModal() {
+            const modal = document.getElementById('archiveModal');
+            if (modal) modal.style.display = 'none';
+            document.body.style.overflow = 'auto';
+        }
+
         function openAddCottageModal() {
             const modal = document.getElementById('addCottageModal');
             modal.style.display = 'flex';
@@ -2913,12 +4582,13 @@ $reviews = $reviewsResult->fetch_all(MYSQLI_ASSOC);
         }
 
         // Modal functions for Edit Room, Cottage, and Pool
-        function openEditRoomModal(id, name, capacity, price, slots, imageUrl, description, available) {
+        function openEditRoomModal(id, name, capacity, price, daySlots, nightSlots, imageUrl, description, available) {
             document.getElementById('editRoomId').value = id;
             document.getElementById('editRoomName').value = name;
             document.getElementById('editRoomCapacity').value = capacity;
             document.getElementById('editRoomPrice').value = price;
-            document.getElementById('editRoomSlots').value = slots;
+            document.getElementById('editRoomDaySlots').value = daySlots;
+            document.getElementById('editRoomNightSlots').value = nightSlots;
             document.getElementById('editRoomImage').value = '';
             document.getElementById('editRoomDescription').value = description;
             document.getElementById('editRoomAvailable').checked = available;
@@ -2934,12 +4604,13 @@ $reviews = $reviewsResult->fetch_all(MYSQLI_ASSOC);
             document.body.style.overflow = 'auto';
         }
 
-        function openEditCottageModal(id, name, capacity, price, slots, imageUrl, description, available) {
+        function openEditCottageModal(id, name, capacity, price, daySlots, nightSlots, imageUrl, description, available) {
             document.getElementById('editCottageId').value = id;
             document.getElementById('editCottageName').value = name;
             document.getElementById('editCottageCapacity').value = capacity;
             document.getElementById('editCottagePrice').value = price;
-            document.getElementById('editCottageSlots').value = slots;
+            document.getElementById('editCottageDaySlots').value = daySlots;
+            document.getElementById('editCottageNightSlots').value = nightSlots;
             document.getElementById('editCottageImage').value = '';
             document.getElementById('editCottageDescription').value = description;
             document.getElementById('editCottageAvailable').checked = available;
@@ -3096,7 +4767,200 @@ $reviews = $reviewsResult->fetch_all(MYSQLI_ASSOC);
                 window.closeDateModal();
             }
         });
+
+        // Fee Modal Functions
+        window.openAddFeeModal = function() {
+            document.getElementById('addFeeModal').style.display = 'flex';
+            document.body.style.overflow = 'hidden';
+        }
+
+        window.closeAddFeeModal = function() {
+            document.getElementById('addFeeModal').style.display = 'none';
+            document.body.style.overflow = 'auto';
+        }
+
+        window.saveFee = async function(event) {
+            event.preventDefault();
+
+            const form = document.getElementById('feeForm');
+            const formData = new FormData(form);
+
+            try {
+                const response = await fetch('../api/save_maintenance_fee.php', {
+                    method: 'POST',
+                    body: formData
+                });
+
+                const result = await response.json();
+
+                if (result.success) {
+                    showReservationNotice('Maintenance Fee Saved', result.message, 'success');
+                    closeAddFeeModal();
+                    form.reset();
+
+                    // Auto-refresh report if one is currently displayed
+                    const reportType = document.getElementById('reportType').value;
+                    const startDate = document.getElementById('reportStartDate').value;
+                    const endDate = document.getElementById('reportEndDate').value;
+
+                    if (reportType && startDate && endDate) {
+                        generateReport();
+                    }
+                } else {
+                    alert('Error: ' + result.message);
+                }
+            } catch (error) {
+                alert('Error saving fee: ' + error.message);
+            }
+        }
     </script>
+
+    <!-- Archived Catalog Modal -->
+    <div id="archiveModal" style="display:none; position:fixed; inset:0; background:rgba(0,0,0,0.5); z-index:2200; align-items:center; justify-content:center; padding:1rem;">
+        <div style="background:#fff; padding:2rem; border-radius:8px; width:90%; max-width:620px; max-height:85vh; overflow-y:auto; box-shadow:0 10px 40px rgba(0,0,0,0.3);">
+            <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:1rem;">
+                <h2 style="color:var(--primary-blue); margin:0;"><i class="fas fa-box-archive"></i> Archived Items</h2>
+                <button type="button" onclick="closeArchiveModal()" style="background:none; border:none; font-size:1.5rem; cursor:pointer; color:var(--text-light);">&times;</button>
+            </div>
+            <?php foreach (['rooms' => ['label' => 'Rooms', 'items' => $archivedRooms, 'action' => 'room'], 'cottages' => ['label' => 'Cottages', 'items' => $archivedCottages, 'action' => 'cottage'], 'pools' => ['label' => 'Pools', 'items' => $archivedPools, 'action' => 'pool'], 'foods' => ['label' => 'Food', 'items' => $archivedFoods, 'action' => 'food']] as $archiveType => $archiveGroup): ?>
+                <section id="archive-<?php echo $archiveType; ?>" style="display:none; margin-bottom:1.25rem;">
+                    <h3 style="color:var(--text-dark); margin:0 0 0.5rem;"><?php echo $archiveGroup['label']; ?></h3>
+                    <?php if (empty($archiveGroup['items'])): ?>
+                        <p style="color:var(--text-light); margin:0;">No archived <?php echo strtolower($archiveGroup['label']); ?>.</p>
+                    <?php else: foreach ($archiveGroup['items'] as $archivedItem): ?>
+                        <div style="display:flex; justify-content:space-between; align-items:center; gap:1rem; padding:0.65rem 0; border-bottom:1px solid var(--border-gray);">
+                            <span><?php echo htmlspecialchars($archivedItem['name']); ?></span>
+                            <form method="post" action="dashboard.php?section=<?php echo $archiveType; ?>">
+                                <input type="hidden" name="<?php echo $archiveGroup['action']; ?>_action" value="restore_<?php echo $archiveGroup['action']; ?>">
+                                <input type="hidden" name="<?php echo $archiveGroup['action']; ?>_id" value="<?php echo (int)$archivedItem['id']; ?>">
+                                <button type="submit" class="btn-small btn-approve"><i class="fas fa-rotate-left"></i> Restore</button>
+                            </form>
+                        </div>
+                    <?php endforeach; endif; ?>
+                </section>
+            <?php endforeach; ?>
+        </div>
+    </div>
+
+    <!-- Approve Reservation Modal -->
+    <div id="approveReservationModal" style="display:none; position:fixed; top:0; left:0; right:0; bottom:0; background:rgba(0,0,0,0.5); z-index:2100; align-items:center; justify-content:center;">
+        <div style="background:white; padding:2rem; border-radius:10px; width:90%; max-width:460px; box-shadow:0 10px 40px rgba(0,0,0,0.3);">
+            <div style="text-align:center; margin-bottom:1.25rem;">
+                <i class="fas fa-check-circle" style="font-size:2.5rem; color:#16a34a;"></i>
+                <h2 style="color:var(--primary-blue); margin:0.75rem 0 0.35rem 0;">Approve Reservation?</h2>
+                <p style="color:var(--text-light); margin:0;">You are about to approve reservation <strong id="approveReservationIdLabel">#</strong>.</p>
+            </div>
+            <p style="color:#374151; margin:0 0 1.5rem 0; text-align:center;">The guest will be notified that their booking is confirmed.</p>
+            <div style="display:flex; gap:0.75rem; justify-content:flex-end;">
+                <button type="button" class="btn-small btn-delete" onclick="closeApproveReservationModal()">Close</button>
+                <button type="button" id="confirmApproveBtn" class="btn-small btn-approve" onclick="confirmApproveReservation()">Confirm Approve</button>
+            </div>
+        </div>
+    </div>
+
+    <!-- Cancel Reservation Modal -->
+    <div id="cancelReservationModal" style="display:none; position:fixed; top:0; left:0; right:0; bottom:0; background:rgba(0,0,0,0.5); z-index:2100; align-items:center; justify-content:center;">
+        <div style="background:white; padding:2rem; border-radius:10px; width:90%; max-width:520px; box-shadow:0 10px 40px rgba(0,0,0,0.3);">
+            <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:1rem;">
+                <h2 style="color:#dc2626; margin:0;">Cancel Reservation</h2>
+                <button onclick="closeCancelReservationModal()" style="background:none; border:none; font-size:1.5rem; cursor:pointer; color:var(--text-light);">&times;</button>
+            </div>
+            <p style="color:var(--text-light); margin:0 0 1rem 0;">Please provide a reason for cancelling reservation <strong id="cancelReservationIdLabel">#</strong>.</p>
+            <label for="cancellationReasonInput" style="display:block; margin-bottom:0.4rem; font-weight:600;">Cancellation Reason <span style="color:#dc2626;">*</span></label>
+            <textarea id="cancellationReasonInput" rows="4" placeholder="Enter the reason for cancellation..." style="width:100%; padding:0.75rem; border:1px solid var(--border-gray); border-radius:6px; resize:vertical; font-family:inherit;"></textarea>
+            <p id="cancellationReasonError" style="display:none; color:#dc2626; margin:0.5rem 0 0 0; font-size:0.9rem;"></p>
+            <div style="display:flex; gap:0.75rem; justify-content:flex-end; margin-top:1.25rem;">
+                <button type="button" class="btn-small" onclick="closeCancelReservationModal()" style="background:#e5e7eb; color:#111827;">Close</button>
+                <button type="button" id="confirmCancelBtn" class="btn-small btn-reject" onclick="confirmCancelReservation()">Confirm Cancel</button>
+            </div>
+        </div>
+    </div>
+
+    <!-- Reservation Notice Modal -->
+    <div id="reservationNoticeModal" style="display:none; position:fixed; top:0; left:0; right:0; bottom:0; background:rgba(0,0,0,0.5); z-index:2200; align-items:center; justify-content:center;">
+        <div style="background:white; padding:2rem; border-radius:10px; width:90%; max-width:420px; box-shadow:0 10px 40px rgba(0,0,0,0.3); text-align:center;">
+            <i id="reservationNoticeIcon" class="fas fa-check-circle" style="font-size:2.5rem; color:#16a34a;"></i>
+            <h2 id="reservationNoticeTitle" style="color:var(--primary-blue); margin:0.75rem 0 0.5rem 0;">Notice</h2>
+            <p id="reservationNoticeMessage" style="color:#374151; margin:0 0 1.25rem 0;"></p>
+            <button type="button" class="btn-small btn-approve" onclick="closeReservationNoticeModal()">OK</button>
+        </div>
+    </div>
+
+    <!-- Custom Delete Confirmation Modal -->
+    <div id="deleteConfirmModal" style="display:none; position:fixed; top:0; left:0; right:0; bottom:0; background:rgba(0,0,0,0.45); z-index:2400; align-items:center; justify-content:center;">
+        <div style="background:#fff; padding:1.5rem 1.5rem 1.25rem; border-radius:12px; width:90%; max-width:420px; box-shadow:0 12px 35px rgba(0,0,0,0.15); border-top:5px solid #ef4444; border:1px solid rgba(239,68,68,0.15);">
+            <p id="deleteConfirmMessage" style="margin:0 0 1.5rem 0; font-size:1.05rem; line-height:1.5; color:#1f2937; font-weight:600; text-align:left;">Are you Sure you want to Delete?</p>
+            <div style="display:flex; justify-content:flex-end; gap:0.75rem;">
+                <button type="button" onclick="closeDeleteConfirmModal()" style="background:#fef2f2; color:#b91c1c; border:1px solid #fecaca; padding:0.7rem 1.5rem; border-radius:999px; font-weight:700; cursor:pointer; min-width:110px; transition:all 0.2s ease;">Cancel</button>
+                <button type="button" onclick="confirmDeleteAction()" style="background:#ef4444; color:#fff; border:none; padding:0.7rem 1.5rem; border-radius:999px; font-weight:700; cursor:pointer; min-width:110px; box-shadow:0 6px 12px rgba(239,68,68,0.2); transition:all 0.2s ease;">OK</button>
+            </div>
+        </div>
+    </div>
+
+    <!-- Management Notice Modal (rooms / cottages / pools / foods) -->
+    <div id="managementNoticeModal" style="display:none; position:fixed; top:0; left:0; right:0; bottom:0; background:rgba(0,0,0,0.5); z-index:2300; align-items:center; justify-content:center;">
+        <div id="managementNoticeCard" style="background:white; padding:2rem; border-radius:10px; width:90%; max-width:420px; box-shadow:0 10px 40px rgba(0,0,0,0.3); text-align:center; border-top:6px solid #2563eb;">
+            <i id="managementNoticeIcon" class="fas fa-info-circle" style="font-size:2.5rem; color:#2563eb;"></i>
+            <h2 id="managementNoticeTitle" style="margin:0.75rem 0 0.5rem 0; color:#2563eb;">Notice</h2>
+            <p id="managementNoticeMessage" style="color:#374151; margin:0 0 1.25rem 0;"></p>
+            <button type="button" id="managementNoticeOkBtn" class="btn-small" onclick="closeManagementNotice()" style="background:#2563eb; color:#fff; border:none; padding:0.55rem 1.4rem; border-radius:6px; font-weight:600; cursor:pointer;">OK</button>
+        </div>
+    </div>
+
+    <!-- Add Fee Modal -->
+    <div id="addFeeModal" style="display:none; position:fixed; top:0; left:0; right:0; bottom:0; background:rgba(0,0,0,0.5); z-index:2000; align-items:center; justify-content:center;">
+        <div style="background:white; padding:2rem; border-radius:8px; width:90%; max-width:600px; max-height:90vh; overflow-y:auto; box-shadow:0 10px 40px rgba(0,0,0,0.3);">
+            <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:1.5rem;">
+                <h2 style="color:var(--primary-blue); margin:0;">Add Maintenance/Repair Fee</h2>
+                <button onclick="closeAddFeeModal()" style="background:none; border:none; font-size:1.5rem; cursor:pointer; color:var(--text-light);">&times;</button>
+            </div>
+            <form id="feeForm" onsubmit="saveFee(event)">
+                <div style="margin-bottom:1rem;">
+                    <label style="display:block; margin-bottom:0.35rem; font-weight:600;">Fee Type</label>
+                    <select name="fee_type" required style="width:100%; padding:0.7rem; border:1px solid var(--border-gray); border-radius:6px;">
+                        <option value="maintenance">Maintenance</option>
+                        <option value="repair">Repair</option>
+                        <option value="upgrade">Upgrade</option>
+                    </select>
+                </div>
+
+                <div style="margin-bottom:1rem;">
+                    <label style="display:block; margin-bottom:0.35rem; font-weight:600;">Facility Type</label>
+                    <select name="facility_type" required style="width:100%; padding:0.7rem; border:1px solid var(--border-gray); border-radius:6px;">
+                        <option value="pool">Pool</option>
+                        <option value="cottage">Cottage</option>
+                        <option value="room">Room</option>
+                        <option value="general">General</option>
+                    </select>
+                </div>
+
+                <div style="margin-bottom:1rem;">
+                    <label style="display:block; margin-bottom:0.35rem; font-weight:600;">Facility Name</label>
+                    <input type="text" name="facility_name" required placeholder="e.g., Main Pool, Cottage A, Room 101" style="width:100%; padding:0.7rem; border:1px solid var(--border-gray); border-radius:6px;">
+                </div>
+
+                <div style="margin-bottom:1rem;">
+                    <label style="display:block; margin-bottom:0.35rem; font-weight:600;">Amount (₱)</label>
+                    <input type="number" name="amount" required min="0" step="0.01" placeholder="0.00" style="width:100%; padding:0.7rem; border:1px solid var(--border-gray); border-radius:6px;">
+                </div>
+
+                <div style="margin-bottom:1rem;">
+                    <label style="display:block; margin-bottom:0.35rem; font-weight:600;">Description</label>
+                    <textarea name="description" rows="3" placeholder="Describe the maintenance or repair work..." style="width:100%; padding:0.7rem; border:1px solid var(--border-gray); border-radius:6px; resize:vertical;"></textarea>
+                </div>
+
+                <div style="margin-bottom:1rem;">
+                    <label style="display:block; margin-bottom:0.35rem; font-weight:600;">Date Incurred</label>
+                    <input type="date" name="date_incurred" required style="width:100%; padding:0.7rem; border:1px solid var(--border-gray); border-radius:6px;">
+                </div>
+
+                <div style="margin-top:1.5rem; display:flex; gap:1rem;">
+                    <button type="submit" class="btn-primary">Save Fee</button>
+                    <button type="button" class="btn-small btn-delete" onclick="closeAddFeeModal()">Cancel</button>
+                </div>
+            </form>
+        </div>
+    </div>
 
     <!-- Date Picker Modal -->
     <div id="dateModal" style="display: none; position: fixed; top: 0; left: 0; right: 0; bottom: 0; background: rgba(0,0,0,0.5); z-index: 2000; align-items: center; justify-content: center;">

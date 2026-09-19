@@ -38,11 +38,11 @@ try {
             DATE_FORMAT(check_in, '%Y-%m') as month,
             DATE_FORMAT(check_in, '%M %Y') as month_name,
             COUNT(*) as total_bookings,
-            COALESCE(SUM(CASE WHEN status IN ('approved', 'completed') THEN total_amount ELSE 0 END), 0) as total_revenue,
+            COALESCE(SUM(CASE WHEN status IN ('approved', 'completed') THEN total_amount ELSE 0 END), 0) as gross_revenue,
             COUNT(CASE WHEN status = 'approved' THEN 1 END) as approved_bookings,
             COUNT(CASE WHEN status = 'completed' THEN 1 END) as completed_bookings,
             COUNT(CASE WHEN status = 'cancelled' THEN 1 END) as cancelled_bookings
-        FROM reservations 
+        FROM reservations
         WHERE check_in BETWEEN ? AND ?
         GROUP BY DATE_FORMAT(check_in, '%Y-%m'), DATE_FORMAT(check_in, '%M %Y')
         ORDER BY month ASC
@@ -55,11 +55,28 @@ try {
 
     $monthlyData = [];
     while ($row = $result->fetch_assoc()) {
+        // Get maintenance fees for this month
+        $monthStart = $row['month'] . '-01';
+        $monthEnd = $row['month'] . '-31';
+        
+        $feeQuery = "SELECT COALESCE(SUM(amount), 0) as total_fees FROM maintenance_fees WHERE date_incurred BETWEEN ? AND ?";
+        $feeStmt = $conn->prepare($feeQuery);
+        $feeStmt->bind_param('ss', $monthStart, $monthEnd);
+        $feeStmt->execute();
+        $feeResult = $feeStmt->get_result();
+        $feeRow = $feeResult->fetch_assoc();
+        $totalFees = (float)$feeRow['total_fees'];
+        
+        $grossRevenue = (float)$row['gross_revenue'];
+        $netRevenue = $grossRevenue - $totalFees;
+        
         $monthlyData[] = [
             'month' => $row['month'],
             'month_name' => $row['month_name'],
             'total_bookings' => (int)$row['total_bookings'],
-            'total_revenue' => (float)$row['total_revenue'],
+            'gross_revenue' => $grossRevenue,
+            'maintenance_fees' => $totalFees,
+            'net_revenue' => $netRevenue,
             'approved_bookings' => (int)$row['approved_bookings'],
             'completed_bookings' => (int)$row['completed_bookings'],
             'cancelled_bookings' => (int)$row['cancelled_bookings']
@@ -68,13 +85,13 @@ try {
 
     // Get overall summary
     $summaryQuery = "
-        SELECT 
+        SELECT
             COUNT(*) as total_bookings,
-            COALESCE(SUM(CASE WHEN status IN ('approved', 'completed') THEN total_amount ELSE 0 END), 0) as total_revenue,
+            COALESCE(SUM(CASE WHEN status IN ('approved', 'completed') THEN total_amount ELSE 0 END), 0) as gross_revenue,
             COUNT(CASE WHEN status = 'approved' THEN 1 END) as approved_bookings,
             COUNT(CASE WHEN status = 'completed' THEN 1 END) as completed_bookings,
             COUNT(CASE WHEN status = 'cancelled' THEN 1 END) as cancelled_bookings
-        FROM reservations 
+        FROM reservations
         WHERE check_in BETWEEN ? AND ?
     ";
 
@@ -84,9 +101,37 @@ try {
     $summaryResult = $stmt->get_result();
     $summary = $summaryResult->fetch_assoc();
 
+    // Get detailed maintenance fees for the period
+    $feeQuery = "SELECT id, fee_type, facility_type, facility_name, amount, description, date_incurred FROM maintenance_fees WHERE date_incurred BETWEEN ? AND ? ORDER BY date_incurred DESC";
+    $feeStmt = $conn->prepare($feeQuery);
+    $feeStmt->bind_param('ss', $startDate, $endDate);
+    $feeStmt->execute();
+    $feeResult = $feeStmt->get_result();
+
+    $feeDetails = [];
+    $totalFees = 0;
+    while ($feeRow = $feeResult->fetch_assoc()) {
+        $feeDetails[] = [
+            'id' => (int)$feeRow['id'],
+            'fee_type' => $feeRow['fee_type'],
+            'facility_type' => $feeRow['facility_type'],
+            'facility_name' => $feeRow['facility_name'],
+            'amount' => (float)$feeRow['amount'],
+            'description' => $feeRow['description'],
+            'date_incurred' => $feeRow['date_incurred']
+        ];
+        $totalFees += (float)$feeRow['amount'];
+    }
+
+    $grossRevenue = (float)$summary['gross_revenue'];
+    $netRevenue = $grossRevenue - $totalFees;
+
     $summaryData = [
         'total_bookings' => (int)$summary['total_bookings'],
-        'total_revenue' => (float)$summary['total_revenue'],
+        'gross_revenue' => $grossRevenue,
+        'maintenance_fees' => $totalFees,
+        'fee_details' => $feeDetails,
+        'net_revenue' => $netRevenue,
         'approved_bookings' => (int)$summary['approved_bookings'],
         'completed_bookings' => (int)$summary['completed_bookings'],
         'cancelled_bookings' => (int)$summary['cancelled_bookings']

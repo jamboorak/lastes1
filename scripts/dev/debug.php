@@ -9,14 +9,14 @@ echo "<h2>Admin Dashboard Debug</h2>";
 echo "<h3>Testing Includes:</h3>";
 
 try {
-    require_once '../config/database.php';
+    require_once __DIR__ . '/../../config/database.php';
     echo "✅ Database config loaded<br>";
 } catch (Exception $e) {
     echo "❌ Database config error: " . $e->getMessage() . "<br>";
 }
 
 try {
-    require_once '../config/config.php';
+    require_once __DIR__ . '/../../config/config.php';
     echo "✅ Main config loaded<br>";
 } catch (Exception $e) {
     echo "❌ Main config error: " . $e->getMessage() . "<br>";

@@ -2,6 +2,7 @@
 require_once __DIR__ . '/../config/config.php';
 require_once __DIR__ . '/../config/database.php';
 require_once __DIR__ . '/../models/User.php';
+require_once __DIR__ . '/../includes/ActivityLogger.php';
 
 if (session_status() === PHP_SESSION_NONE) {
     session_start();
@@ -85,6 +86,7 @@ try {
         
         // Update last login
         $userModel->updateLastLogin($existingUser['id']);
+        logUserActivity($db, $existingUser['id'], 'login', 'User logged in after OTP verification');
         
         // Clear Google user data from session
         unset($_SESSION['google_user_data']);
@@ -117,6 +119,7 @@ try {
             
             // Update last login
             $userModel->updateLastLogin($userId);
+            logUserActivity($db, $userId, 'login', 'User created an account and logged in after OTP verification');
             
             // Clear Google user data from session
             unset($_SESSION['google_user_data']);
